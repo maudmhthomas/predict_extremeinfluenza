@@ -12,6 +12,7 @@ To run the codes, install the following R librairies:
   - foreach (1.4.4
   - brglm (0.6.2)
   - pracma (2.2.5)
+  - pROC (1.15.3)
 
 ### Description of the files:
 Files are provided in the format Rmarkdown. To run them, please select in RStudio "run all the chunkes" to run them in the R console or "knit to html" to provide a hmtl file containing all the codes and all outputs.
