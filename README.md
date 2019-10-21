@@ -22,6 +22,7 @@ Files are provided in the format Rmarkdown. To run them, please select in RStudi
 - ILIincidences1985-2019.csv: Real data associated with the codes.
 - SimulatedDataWeek3.csv: simulated data for the prediction of Week 3.
 - SimulatedDataSize.csv: simulated data for the prediction of the Size.
+- PredSimus_Week3: predictions for Simulations of Week3 (needed for RunWeek3, can be obtained with RunSimulationsWeek3)
 - GumbelSimulate.Rmd: Rmarkdown file to obtain the simulated data (SimulatedDataWeek3.csv and SimulatedDataSize.csv).
 - RunRealWeek3.Rmd: Rmarkdown file to produce all the results about the prediction of Week 3 from the real data.
 - RunRealSize.Rmd: Rmarkdown file to produce all the results about the prediction of Size from the real data.
