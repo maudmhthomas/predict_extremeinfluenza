@@ -1,0 +1,131 @@
+---
+title: "Simulations of epidemics"
+output:
+  html_document:
+    df_print: paged
+---
+
+## Preamble
+
+
+```{r setting packages}
+libs <- c("extRemes", "foreach", "doParallel")
+sapply(libs,require,character.only = T, quietly = TRUE, warn.conflicts = FALSE)
+```
+
+```{r function files}
+require(knitr,quietly=TRUE,warn.conflicts = FALSE)
+knit("PredictEpidemicTools.Rmd",quiet = TRUE)
+```
+
+```{r parallel coding settings}
+detectCores()
+cl <- makeCluster(3) #set for 4 cores
+
+registerDoParallel(cl)
+
+getDoParWorkers()
+```
+
+## Simulations for Week 3
+
+Simulations of the first weeks of an epidemic according to the fitted Gumbel model for Week 3
+
+```{r week 3 parameters}
+est.param <- read.csv("EstimatesParametersWeek3.csv", row.names=1)
+alpha <- as.matrix(est.param)[1,]
+beta <- as.matrix(est.param)[2,]
+```
+
+```{r simulations week 3}
+d <- 3
+N <- 16500
+simul.dataU_Gumbel_week3 <- data.frame(weeks = rep(1:d,N))
+season <- c()
+for (i in 1:N){
+  temp <- rep(i,d)
+  season <- c(season, temp)
+}
+simul.dataU_Gumbel_week3$season <- season
+
+alpha <- alpha
+beta <- beta
+
+simul_fun <- function(i){
+    library(extRemes)
+    X0 <- c()
+    K <- 1e6
+    test = TRUE
+    while (test){
+ Tbar <- runif(n = 1, min = 0, max = K)
+        R <- c()
+   for (j in 1:d){
+      R <- c(R,revd(n = 1,loc = beta[j], scale = 1/alpha[j], shape = 0))
+    }
+  if (sum(R > log(Tbar))>0) {X0 <- c(X0, R-log(Tbar)) ; test <- F}
+  }
+    return(X0)
+}
+
+x_week3 <- foreach(i = 1:N) %dopar% simul_fun(i)
+x_week3
+```
+
+```{r saving simulations Week3}
+simul.dataU_Gumbel_week3$excess <- unlist(x_week3)
+#write.csv(simul.dataU_Gumbel_week3, file = "SimulatedDataWeek3.csv") ## To save the simulations
+```
+
+
+## Simulations for Size 
+
+Simulations of the first weeks of an epidemic according to the fitted Gumbel model for Size 
+
+```{r size parameters}
+est.param <- read.csv("EstimatesParametersSize.csv", row.names=1)
+alpha <- as.matrix(est.param)[1,]
+beta <- as.matrix(est.param)[2,]
+```
+
+```{r simulations Size}
+d <- 3
+N <- 16000
+simul.dataU_Gumbel_size <- data.frame(weeks = rep(1:d,N))
+season <- c()
+for (i in 1:N){
+  temp <- rep(i,d)
+  season <- c(season, temp)
+}
+simul.dataU_Gumbel_size$season <- season
+
+alpha <- alpha
+beta <- beta
+
+simul_fun <- function(i){
+    library(extRemes)
+    X0 <- c()
+    K <- 1e6
+    test = TRUE
+    while (test){
+ Tbar <- runif(n = 1, min = 0, max = K)
+        R <- c()
+   for (j in 1:d){
+      R <- c(R,revd(n = 1,loc = beta[j], scale = 1/alpha[j], shape = 0))
+    }
+  if (sum(R > log(Tbar))>0) {X0 <- c(X0, R-log(Tbar)) ; test <- F}
+  }
+    return(X0)
+}
+
+x_size <- foreach(i = 1:N) %dopar% simul_fun(i)
+
+```
+
+```{r saving simulations Size}
+simul.dataU_Gumbel_size$excess <- unlist(x_size)
+#write.csv(simul.dataU_Gumbel_size, file = "SimulatedDataSize.csv")## To save the simulations
+```
+
+
+
+

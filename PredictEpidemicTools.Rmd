@@ -1,0 +1,805 @@
+---
+title: "Predict Epidemic Tools"
+output:
+  html_document:
+    df_print: paged
+---
+## Data Tools 
+
+```{r EpidemicDataFrameSerfling}
+#' @param data data 
+#' @param d1 1st epidemic week to consider
+#' @param d2 last epidemic week to consider
+#' @return a data frame with a year column and two columns with the rate et the deseasonalized rate for epidemic weekds d1 to d2
+EpidemicDataFrameSerfling <- function(data, d1, d2) {
+  sub_data <- subset(x = data, subset = epid_serfling == 1)
+  season <- unique(sub_data$season)
+  l.season <- length(season)
+  l.epid <- d2 - d1 + 1
+  epidemic_data <-
+    data.frame(
+      season = rep(season, each = l.epid),
+      weeks = d1:d2,
+      t_inc = rep(0, l.epid * length(season)),
+      t_inc_cent = rep(0, l.epid * length(season))
+    )
+  
+  for (i in season) {
+    temp <- subset(sub_data, subset = season == i)
+    epidemic_data[epidemic_data$season == i,]$t_inc <-
+      temp[d1:d2,]$t_inc
+    epidemic_data[epidemic_data$season == i,]$t_inc_cent <-
+      temp[d1:d2,]$t_inc_cent
+  }
+  return(epidemic_data)
+}
+```
+
+```{r EpidemicDataFrame}
+#' @param data data 
+#' @param d number of epidemic weeks to consider
+#' @param thres threshold for the definition of an epidemic 
+#' @return a data frame with a year column and two columns with the rate et the deseasonalized rate for the d first weeks when thres has been exceeded
+EpidemicDataFrame <- function(data, d, thres) {
+  sub_data <- subset(x = data, subset = epid_serfling == 1)
+  season <- unique(sub_data$season)
+  l.season <- length(season)
+  epidemic_data <- data.frame(
+    season = rep(0, d),
+    weeks = 1:d,
+    t_inc = rep(NA, d),
+    t_inc_cent = rep(NA, d)
+  )
+  
+  for (i in season) {
+    temp <- subset(sub_data, subset = season == i)
+    last.week <- length(temp$season)
+    index <- which(temp$t_inc > thres)
+    if (length(index) > 1) {
+      first.week <- index[which(diff(index) == 1)[1]]
+      toto <- temp[first.week:last.week,]
+      l.toto <- length(toto$t_inc)
+      if (l.toto > d) {
+        epidemic_data <- rbind(epidemic_data,
+                               cbind(
+                                 season = rep(i, d),
+                                 weeks = 1:d,
+                                 t_inc = c(toto[1:d,]$t_inc),
+                                 t_inc_cent = c(toto[1:d,]$t_inc_cent)
+                               ))
+      }
+      else{
+        epidemic_data <- rbind(epidemic_data,
+                               cbind(
+                                 season = rep(i, d),
+                                 weeks = 1:d,
+                                 t_inc = c(toto$t_inc,
+                                           rep(NA, d - l.toto)),
+                                 t_inc_cent = c(toto$t_inc_cent,
+                                                rep(NA, d - l.toto))
+                               ))
+        
+      }
+    }
+  }
+  epidemic_data <- epidemic_data[-(1:d),]
+  return(epidemic_data)
+}
+```
+
+```{r EpidemicDataFrame_cum}
+#' @param data data frame with (at least) three columns (year, epid, t_inc) of type EpidemicDataFrame
+#' @param d length of the Serfling epidemic 
+#' @return a data frame with a year column, epidemic weeks and a incidence column with ILI rates of week 1, week 2 and size the epidemic 
+
+EpidemicDataFrame_cum <- function(data) {
+  season <- unique(data$season)
+  epidemic_data <- data.frame(
+    season = rep(season,each = 3),
+    weeks = rep(1:3, length(season)),
+    t_inc = rep(NA, 3*length(season)),
+    t_inc_cent =rep(NA, 3*length(season)))
+  
+  for (i in unique(data$season)){
+    temp <- subset(data, season == i)
+    epidemic_data[(epidemic_data$season == i), ]$t_inc <- c(
+      temp[temp$week == 1, ]$t_inc, 
+      temp[temp$week == 2, ]$t_inc,
+      sum(temp$t_inc, na.rm = T)
+    )
+    epidemic_data[(epidemic_data$season == i), ]$t_inc_cent <- c(
+      temp[temp$week == 1, ]$t_inc_cent, 
+      temp[temp$week == 2, ]$t_inc_cent,
+      sum(temp$t_inc_cent, na.rm = T)
+    )
+  }
+    return(epidemic_data)
+}
+```
+
+## Density of a multivariate GPD with independent Gumbel generators
+
+```{r fGumbelU_1}
+#' @param t positive real
+#' @param x a vector of dimension d
+#' @param alpha a vector of dimension d
+#' @param beta a vector of dimension d
+#' @return Integrand in the numerator in the density of a multivariate GPD with independent Gumbel generators
+fGumbelU_1 <- function(t, x, alpha, beta) {
+  d <- length(beta)
+  y <- alpha * (x - beta)
+  tointegrate <- 1
+  for (j in 1:d) {
+    tointegrate <-
+      tointegrate * alpha[j] * t ^ (-alpha[j]) * exp(-y[j]) * exp(-(t ^ (-alpha[j]) *
+                                                                      exp(-y[j])))
+  }
+  return(tointegrate)
+}
+```
+
+```{r fGumbelU_2}
+#' @param t positive real
+#' @param x a vector of dimension d
+#' @param alpha a vector of dimension d
+#' @param beta a vector of dimension d
+#' @return Integrand in the denominator in the density of a multivariate GPD with independent Gumbel generators
+fGumbelU_2 <- function(t, x, alpha, beta) {
+  d <- length(beta)
+  tointegrate <- 1
+  for (j in 1:d) {
+    tointegrate <-
+      tointegrate * exp(-(t ^ (-alpha[j]) * exp(alpha[j] * beta[j])))
+  }
+  return(1 - tointegrate)
+}
+```
+
+```{r DensityGumbelMGPDstand_U}
+#' @param x a vector of dimension d
+#' @param alpha a vector of dimension d
+#' @param beta a vector of dimension d
+#' @return density of a multivariate GPD with independent Gumbel generators
+
+DensityGumbelMGPDstand_U <- function(x, alpha, beta) {
+  d <- length(alpha)
+  if (length(unique(alpha)) == 1) {
+    a <- unique(alpha)
+    num <- a ^ (d - 1) * gamma(d - 1 / a) * prod(exp(-(a * (x - beta))))
+    den <-
+      (sum(exp(-(a * (
+        x - beta
+      ))))) ^ (d - 1 / a) * gamma(1 - 1 / a) * (sum(exp(beta * a))) ^ (1 / a)
+    h <- num / den
+  }
+  else{
+    res1 <-
+      quadinf(
+        fGumbelU_1,
+        xa = 1e-3,
+        xb = Inf,
+        tol = 1e-15,
+        x = x,
+        alpha = alpha,
+        beta = beta
+      )
+    res2 <-
+      quadinf(
+        f = fGumbelU_2,
+        xa = 0,
+        xb = Inf,
+        x = x,
+        alpha = alpha,
+        beta = beta,
+        tol = 1e-15
+      )
+    h <- res1$Q / res2$Q
+    return(h)
+  }
+}
+```
+
+## Likelihood for a multivariate GPD model with independent Gumbel generators
+
+```{r LLKGumbelMGPDstand_U}
+#' @param p=c(a,b)  parameter
+#' @param x a data.frame with years and with d incidences for each year of type EpidemicDataFrame
+#' @param beta1 first component of beta to be fixed for identifiability
+#' @return negative log-likelihood 
+
+LLKGumbelMGPDstand_U <- function(p, x, beta1, lw, up){
+  d<-dim(x)[2]
+  alpha <- p[1:d]+1e-12
+  beta <- c(beta1,p[-(1:d)])
+ if(any(alpha<= lw[1])||any(alpha >=up[1])||any( beta<=lw[2]) ||any(beta >=up[2])){nll <- 1e12}
+else{
+  L<-apply(x,1,DensityGumbelMGPDstand_U,alpha=alpha,beta=beta)
+  nll<--sum(log(L))}
+  return(nll)
+}
+```
+
+## Density of a multivariate GPD with independent reverse Gumbel generators
+
+```{r fRevGumbelU_1}
+#' @param t positive real
+#' @param x a vector of dimension d
+#' @param alpha a vector of dimension d
+#' @param beta a vector of dimension d
+#' @return Integrand in the numerator in the density of a multivariate GPD with independent reverser Gumbel generators
+
+fRevGumbelU_1 <- function(t, x, alpha, beta) {
+  d <- length(beta)
+  y <- alpha * (x - beta)
+  tointegrate <- 1
+  for (j in 1:d) {
+    tointegrate <-
+      tointegrate * alpha[j] * t ^ (alpha[j]) * exp(y[j]) * exp(-(t ^ (alpha[j]) *
+                                                                    exp(y[j])))
+  }
+  return(tointegrate)
+}
+```
+
+
+```{r fRevGumbelU_2}
+#' @param t positive real
+#' @param x a vector of dimension d
+#' @param alpha a vector of dimension d
+#' @param beta a vector of dimension d
+#' @return Integrand in the denominator in the density of a multivariate GPD with independent reverse Gumbel generators
+fRevGumbelU_2 <- function(t, x, alpha, beta) {
+  d <- length(beta)
+  tointegrate <- 1
+  for (j in 1:d) {
+    tointegrate <-
+      tointegrate * exp(-(t ^ (alpha[j]) * exp(-alpha[j] * beta[j])))
+  }
+  return(1 - tointegrate)
+}
+```
+
+
+```{r DensityRevGumbelMGPDstand_U}
+#' @param x a vector of dimension d
+#' @param alpha a vector of dimension d
+#' @param beta a vector of dimension d
+#' @return density of a multivariate GPD with independent reverse Gumbel generators
+
+DensityRevGumbelMGPDstand_U <- function(x, alpha, beta) {
+
+  res1 <-
+    quadinf(
+      fRevGumbelU_1,
+      xa = 0.1,
+      xb = Inf,
+      tol = 1e-15,
+      x = x,
+      alpha = alpha,
+      beta = beta
+    )
+
+  res2 <-
+    quadinf(
+      f = fRevGumbelU_2,
+      xa = 0,
+      xb = Inf,
+      x = x,
+      alpha = alpha,
+      beta = beta,
+      tol = 1e-15
+    )
+
+  h <- res1$Q / res2$Q
+  return(h)
+}
+```
+
+## Likelihood for a multivariate GPD model with independent reverse Gumbel generators
+
+```{r LLKRevGumbelMGPDstand_U}
+#' @param p=c(a,b)  parameter
+#' @param x a data.frame with years and with d incidences for each year of type EpidemicDataFrame
+#' @param beta1 first component of beta to be fixed for identifiability
+#' @return negative log-likelihood 
+
+LLKRevGumbelMGPDstand_U <- function(p, x, beta1, lw, up) {
+  d <- dim(x)[2]
+  alpha <- p[1:d] + 1e-12
+  beta <- c(beta1, p[-(1:d)])
+  if (any(alpha <= lw[1]) ||
+      any(alpha >= up[1]) ||
+      any(beta <= lw[2]) || any(beta >= up[2])) {
+    nll <- 1e12
+  }
+  else{
+    L <- apply(x,
+               1,
+               DensityRevGumbelMGPDstand_U,
+               alpha = alpha,
+               beta = beta)
+    nll <- -sum(log(L))
+  }
+  return(nll)
+}
+```
+
+## Density of a multivariate GPD with independent reverse exponential generators
+
+```{r max_expU_Rexp_int}
+#' @param alpha a vector of dimension d
+#' @param beta a vector of dimension d
+#' @return Expectation of the exponential of the maximum of the d-dim vector U with independent reverse exponential generators
+
+toint <- function(t, alpha,beta){
+  d <- length(beta)
+  tointegrate <- 1
+  for (j in 1:d){
+    temp <- min(1,exp(beta[j])*t)
+    tointegrate <- tointegrate*(temp)^(alpha[j])
+  }
+  return(1-tointegrate)
+}
+
+max_expU_Rexp_int <- function(alpha,beta){
+  res <- quadinf(toint, xa = 0, xb = Inf, tol = 1e-15,
+                 alpha = alpha, beta = beta)
+  return(res$Q)
+}
+```
+
+
+```{r DensityRevExpoMGPDstand_U}
+#' @param x a vector of dimension d
+#' @param alpha a vector of dimension d
+#' @param beta a vector of dimension d
+#' @return density of a multivariate GPD with independent reverse Exponential generators
+
+DensityRevExpoMGPDstand_U <-function(x,alpha, beta)
+{
+  EM <- max_expU_Rexp_int(alpha = alpha, beta = beta)
+  num <- prod(alpha*exp(alpha*(x+beta)))
+  den <- EM*((1+sum(alpha))*max(exp(x+beta))^(sum(alpha)+1))
+  return(num/den)
+}
+```
+
+## Likelihood for a multivariate GPD model with independent reverse Exponential generators
+
+```{r LLKRevExpoMGPDstand_U}
+#' @param p=c(a,b)  parameter
+#' @param x a data.frame with years and with d incidences for each year of type EpidemicDataFrame
+#' @param beta1 first component of beta to be fixed for identifiability
+#' @return negative log-likelihood 
+
+LLKRevExpoMGPDstand_U <- function(p, x, beta1, lw, up){
+  d<-dim(x)[2]
+  alpha <- p[1:d]+1e-12
+  beta <- c(beta1,p[-(1:d)])
+  if(any(alpha<= lw[1])||any(alpha >=up[1])||any( beta<=lw[2]) ||any(beta >=up[2])){nll <- 1e12}
+  else{
+  L<-apply(x,1,DensityRevExpoMGPDstand_U,alpha=alpha,beta=beta)
+  nll<--sum(log(L))
+  }
+  return(nll)
+}
+```
+
+## Likelihood for a multivariate Gumbel GPD model with beta fixed 
+
+```{r LLKGumbelMGPDstand_U_alpha}
+#' @param p  parameter = alpha
+#' @param x a data.frame with years and with d incidences for each year of type EpidemicDataFrame
+#' @param beta beta fixed 
+#' @return negative log-likelihood for a multivariate Gumbel GPD model with beta fixed 
+
+LLKGumbelMGPDstand_U_alpha <- function(p, x, beta, lw, up){
+  d<-dim(x)[2]
+  alpha <- p+1e-12
+  if(any(alpha<= lw[1])||any(alpha >=up[1])){nll <- 1e12}
+  else{
+    L<-apply(x,1,DensityGumbelMGPDstand_U,alpha=alpha,beta=beta)
+    nll<--sum(log(L))}
+  return(nll)
+}
+```
+
+## Likelihood for a multivariate Gumbel GPD model with all $\alpha$-s equal 
+
+```{r LLKGumbelMGPDstand_U_abeta}
+#' @param p  parameter = c(a, beta) with alpha = (a,a,...,d)
+#' @param x a data.frame with years and with d incidences for each year of type EpidemicDataFrame
+#' @param beta beta fixed 
+#' @return negative log-likelihood for a multivariate Gumbel GPD model with all alpha equal 
+
+LLKGumbelMGPDstand_U_abeta <- function(p, x, beta1, lw, up) {
+  d <- dim(x)[2]
+  alpha <- rep(p[1] + 1e-12, d)
+  beta <- c(beta1, p[-1])
+  if (any(alpha <= lw[1]) ||
+      any(alpha >= up[1]) ||
+      any(beta <= lw[2]) || any(beta >= up[2])) {
+    nll <- 1e12
+  }
+  else{
+    L <- apply(x,
+               1,
+               DensityGumbelMGPDstand_U,
+               alpha = alpha,
+               beta = beta)
+    nll <- -sum(log(L))
+  }
+  return(nll)
+}
+```
+
+
+## Likelihood for a multivariate Gumbel GPD model with $\beta$ fixed equal to 0 and all $\alpha$ equal
+
+```{r LLKGumbelMGPDstand_U_a}
+#' @param p  parameter = c(a, beta) with alpha = (a,a,...,d)
+#' @param x a data.frame with years and with d incidences for each year of type EpidemicDataFrame
+#' @param beta beta fixed 
+#' @return negative log-likelihood for a multivariate Gumbel GPD model with beta fixed equal to 0 and all alpha equal
+
+LLKGumbelMGPDstand_U_a <- function(p, x, beta, lw, up){
+  d<-dim(x)[2]
+  alpha <- rep(p[1]+1e-12,d)
+  if(any(alpha<= lw[1])||any(alpha >=up[1])){nll <- 1e12}
+  else{
+    L<-apply(x,1,DensityGumbelMGPDstand_U,alpha=alpha,beta=beta)
+    nll<--sum(log(L))}
+  return(nll)
+}
+```
+
+## Probability to be extreme given x1 and x2
+
+```{r proba_extreme_3g12}
+#' @param x12 Excesses of the two first weeks of a new epidemic 
+#' @returm Probability to be extreme given the two first weeks of a new epidemic
+proba_extreme_3g12 <- function(x12) {
+  proba_extreme <- read.csv("ProbaExtremeWeek3.csv",
+           row.names = 1)
+  if (any(x12 > 0)) {
+    res <- 1
+  }
+  else{
+    res <- proba_extreme
+  }
+  return(res)
+}
+```
+
+## Probability to be extreme given x1 and x2 for the size
+
+```{r proba_extreme_3g12_cum}
+#' @param x12 Excesses of the two first weeks of a new epidemic 
+#' @returm Probability to be extreme given the two first weeks of a new epidemic
+proba_extreme_3g12_cum <- function(x12) {
+  proba_extreme <- read.csv("ProbaExtremeSize.csv",
+           row.names = 1)
+  if (any(x12 > 0)) {
+    res <- 1
+  }
+  else{
+    res <- proba_extreme
+  }
+  return(res)
+}
+```
+
+## Density of a 1-d Gumbel r.v.
+
+```{r marg.GumbelU}
+#' @param x real 
+#' @param alpha scale parameter
+#' @param beta location parameter
+#' @return the density of a one-dim Gumbel r.v. 
+
+marg.GumbelU <- function(x, alpha, beta){
+  f <- alpha*exp(-alpha*(x-beta))*exp(-exp(-alpha*(x-beta)))
+  return(f)
+}
+```
+
+## Conditionnal density of X3 given (X1,X2)
+
+```{r condDensity}
+#' @param t positive real 
+#' @param a left endpoint of the interval of integration
+#' @param x12 2-d vector representing the first components of x=(x1,x2,x3)
+#' @param alpha scale parameter
+#' @param beta location parameter
+#' @return the conditionnal density of X3 given (X1,X2) 
+
+condDensity <- function(t, a, x12, alpha, beta){
+  x1 <- x12[1]
+  x2 <- x12[2]
+  f <- marg.GumbelU(x = x1+log(t), alpha = alpha[1], beta = beta[1])*marg.GumbelU(x = x2+log(t), alpha = alpha[2], beta = beta[2])*pevd(a+log(t), loc =beta[3], scale = 1/alpha[3], type = "Gumbel", lower.tail = FALSE)
+  if (is.na(f)){f <- 0}
+  return(f)
+}
+```
+
+## Intregration of the conditionnal density 
+```{r PredictInt}
+#' @param a left endpoint of the interval of integration
+#' @param x12 2-d vector representing the first components of x=(x1,x2,x3)
+#' @param alpha scale parameter
+#' @param beta location parameter
+#' @return Integral of the conditionnal density of X3 given (X1,X2) on the interval [a, infty)
+
+PredictInt <- function(a,x12,alpha,beta){
+  res_pred <- quadinf(condDensity, xa = 0, xb =Inf, tol = 1e-10, a=a,  x12 = x12, alpha = alpha, 
+                      beta=beta)
+  return(res_pred$Q)
+}
+```
+
+## Probability to exceed that the 3rd component exceeds a certain threshold given the first two components
+
+```{r excessprobGumbelU_3g12}
+#' @param v3 exceedance threshold 
+#' @param x12 2-d vector representing the first components of x=(x1,x2,x3)
+#' @param alpha scale parameter
+#' @param beta location parameter
+#' @return Probability to exceed that the 3rd component exceeds a certain threshold given the first two components 
+
+excessprobGumbelU_3g12 <- function(v3, x12, alpha = alpha, beta=beta){
+  if (any(x12>0)){
+    num <- PredictInt(a = v3, x12 = x12, alpha = alpha, beta = beta)
+    den <- PredictInt(a = -Inf, x12 = x12, alpha = alpha, beta = beta)
+    res <- num/den
+  }
+  else if (v3 <=0) {res <- 1}
+  else{      
+    num <- PredictInt(a = v3, x12 = x12, alpha = alpha, beta = beta)
+    den <- PredictInt(a = 0, x12 = x12, alpha = alpha, beta = beta)
+    res <- num/den
+  }
+return(res)
+}
+```
+
+
+## Leave-one-out 
+
+```{r LOO_fit}
+#' @param i loop index 
+#' @param train_list training data set
+#' @param thres_gpd GPD threshold
+#' @return a matrix with the index i, estimates of the parameters
+
+
+LOO_fit <- function(i, train_list, thres_gpd) {
+  epid_data_LOO <- train_list[[i]]
+  excess_matrix_LOO <-
+    matrix(epid_data_LOO$excess_stand,
+           ncol = d,
+           byrow = T)
+
+  #Standard joint estimation
+  alpha0 <- est.alpha_M1
+  b0 <- est.beta_M1[2:3]
+  beta1 <- 0
+  fitGumbelU_standard <-
+    optim(
+      par = c(alpha0, b0),
+      fn = LLKGumbelMGPDstand_U,
+      x = excess_matrix_LOO,
+      beta1 = beta1,
+      lw = c(1.1,-1.5),
+      up = c(10, 1.5),
+      control = list(maxit = 1e4, reltol = 10e-10)
+    )
+  est.alpha <- fitGumbelU_standard$par[1:d]
+  est.beta <- c(beta1, fitGumbelU_standard$par[-(1:d)])
+  return(matrix(c(i, est.alpha, est.beta), ncol = 7))
+}
+```
+
+
+## Leave-one-out prediction 
+
+```{r pred_parallel}
+#' @param i loop index 
+#' @param train_list training data set
+#' @param thres_gpd GPD threshold
+#' @return a matrix with the value of the excess of Week 3, GP prediction, Logistic prediction, value of the likelihood 
+
+pred_parallel <- function(i, train_list, test_list) {
+  epid_data_train <-
+    data.frame(
+      week1 = train_list[[i]][train_list[[i]]$weeks == 1, ]$excess_stand,
+      week2 = train_list[[i]][train_list[[i]]$weeks ==
+                                2, ]$excess_stand,
+      week3 = train_list[[i]][train_list[[i]]$weeks ==
+                                3, ]$excess_stand
+    )
+  epid_data_test <-
+    data.frame(
+      week1 = test_list[[i]][test_list[[i]]$weeks == 1, ]$excess_stand,
+      week2 = test_list[[i]][test_list[[i]]$weeks ==
+                                2, ]$excess_stand,
+      week3 = test_list[[i]][test_list[[i]]$weeks ==
+                                3, ]$excess_stand
+    )
+  est.alpha <- est.alpha_list[[i]]
+  est.beta <- est.beta_list[[i]]
+  ### Prediction
+  excess3 <- epid_data_test$week3
+  excess12 <- c(epid_data_test$week1, epid_data_test$week2)
+
+  predMGPD <- rep(0, length(thres_pred))
+  predLOGIT <- rep(0, length(thres_pred))
+
+  for (j in 1:length(thres_pred)) {
+    predMGPD[j] <-
+      excessprobGumbelU_3g12(
+        v3 = thres_pred[j],
+        x12 = excess12 ,
+        alpha = est.alpha,
+        beta = est.beta
+      )
+
+    epid_data_train$outcome <- epid_data_train$week3 > thres_pred[j]
+    fit <-
+      brglm(
+        formula = outcome ~ week1 + week2,
+        data = epid_data_train,
+        family = binomial,
+        maxit = 100
+      )
+
+    predLOGIT[j] <-
+      exp(
+        fit$coefficients[1] + fit$coefficients[2] * epid_data_test$week1 + fit$coefficients[3] *
+          epid_data_test$week2
+      ) / (
+        1 + exp(
+          fit$coefficients[1] + fit$coefficients[2] * epid_data_test$week1 + fit$coefficients[3] *
+            epid_data_test$week2
+        )
+      )
+  }
+  excess_matrix_test <- c(epid_data_test$week1, epid_data_test$week2,epid_data_test$week3)
+  LLK <-
+    DensityGumbelMGPDstand_U(x = excess_matrix_test,
+                             alpha = est.alpha,
+                             beta = est.beta)
+  return(matrix(c(excess3, predMGPD, predLOGIT, LLK), ncol = 12))
+}
+```
+
+
+## Functions for parallel fit for simulations
+
+```{r FitParallelSimus}
+#' @param i loop index 
+#' @param excess_list list of train sets
+#' @return a matrix with the index i, estimated parameters, maximised negative likelihood   
+ FitParallelSimus <- function(i, excess_list){
+  excess_matrix <- excess_list[[i]]
+  excess_matrix_train <- excess_matrix[1:n_train, ]
+  alpha0 <- alpha[1:d]
+  b0 <- beta[2:d]
+  beta1 <- 0
+  fitGumbelU_standard <- optim(par = c(alpha0,b0),fn=LLKGumbelMGPDstand_U,
+                               x = excess_matrix_train,
+                               beta1 =beta1,
+                               lw = c(1.1, -1.5),
+                               up = c(7, 1.5), control = list(maxit = 1e4, reltol = 10e-10))
+  est.alpha <- fitGumbelU_standard$par[1:d]
+  est.beta <- c(beta1, fitGumbelU_standard$par[-(1:d)])
+  LLK <- fitGumbelU_standard$value
+
+  return(matrix(c(i,est.alpha, est.beta, LLK), ncol = 8))
+}
+```
+
+## Function for parallel prediction for simulated data Week 3
+
+```{r PredParallelSimus}
+#' @param i loop index 
+#' @param split_index the index of the different datasets
+#' @return a matrix with the value of the excess of Week 3, GP prediction, logistic prediction, the negative likelihood  
+PredParallelSimus <- function(i, split_index) {
+  excess_matrix <- excess_list[[i]]
+  excess_matrix_train <- excess_matrix[1:n_train, ]
+  epid_data_train <- data.frame(
+    season = 1:n_train,
+    week1 = excess_matrix_train[, 1],
+    week2 = excess_matrix_train[, 2],
+    week3 = excess_matrix_train[, 3]
+  )
+  excess_matrix_test <- excess_matrix[n_train + n_test,]
+
+  est.alpha <- est.alpha_list[[i]]
+  est.beta <- est.beta_list[[i]]
+  ### Prediction
+  epid_data_test <- data.frame(
+    indice = i,
+    week1 = excess_matrix_test[1],
+    week2 = excess_matrix_test[2],
+    week3 = excess_matrix_test[3]
+  )
+  excess3 <- excess_matrix_test[3]
+  excess12 <- excess_matrix_test[1:2]
+
+  predMGPD <- rep(0, length(thres_pred))
+  predLOGIT <- rep(0, length(thres_pred))
+
+  for (j in 1:length(thres_pred)) {
+    predMGPD[j] <-
+      excessprobGumbelU_3g12(
+        v3 = thres_pred[j],
+        x12 = excess12 ,
+        alpha = est.alpha,
+        beta = est.beta
+      )
+
+    epid_data_train$outcome <- epid_data_train$week3 > thres_pred[j]
+    fit <-
+      brglm(
+        formula = outcome ~ week1 + week2,
+        data = epid_data_train,
+        family = binomial,
+        maxit = 100
+      )
+
+    predLOGIT[j] <-
+      exp(
+        fit$coefficients[1] + fit$coefficients[2] * epid_data_test$week1 + fit$coefficients[3] *
+          epid_data_test$week2
+      ) / (
+        1 + exp(
+          fit$coefficients[1] + fit$coefficients[2] * epid_data_test$week1 + fit$coefficients[3] *
+            epid_data_test$week2
+        )
+      )
+  }
+
+  LLK <-
+    DensityGumbelMGPDstand_U(x = excess_matrix_test,
+                             alpha = est.alpha,
+                             beta = est.beta)
+  return(matrix(c(excess3, predMGPD, predLOGIT, LLK), ncol = 12))
+}
+```
+
+## Parallel prediction with True model 
+
+```{r PredParallelTrue}
+#' @param i loop index 
+#' @param split_index the index of the different datasets
+#' @return a matrix with the value of the excess of Week 3, GP prediction with True Gumbel model
+PredParallelTrue <- function(i, split_index){
+  excess_matrix <- excess_list[[i]] 
+  excess_matrix_train <- excess_matrix[1:n_train,]
+    epid_data_train <- data.frame(
+      season = 1:n_train,
+      week1 =
+        excess_matrix_train[, 1],
+      week2 = excess_matrix_train[, 2],
+      week3 =
+        excess_matrix_train[, 3]) 
+    excess_matrix_test <- excess_matrix[n_train + n_test, ]
+    
+    ### Prediction
+    excess3 <- excess_matrix_test[3]
+    excess12 <- excess_matrix_test[1:2]
+    
+    predMGPD <- rep(0, length(thres_pred))
+    
+    for (j in 1:length(thres_pred)) {
+      predMGPD[j] <- excessprobGumbelU_3g12(
+        v3 = thres_pred[j],
+        x12 = excess12 ,
+        alpha = alpha,
+        beta = beta
+      )
+    }
+    return(matrix(c(excess3, predMGPD), ncol = 6))
+}
+```

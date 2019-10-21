@@ -1,0 +1,997 @@
+---
+title: "Codes for Simulated data for Week 3"
+output:
+  html_document:
+    df_print: paged
+---
+
+## Preamble
+
+
+```{r setting packages}
+libs <- c("ggplot2", "pracma", "brglm", "extRemes", "foreach", "doParallel", "gridExtra", "ismev","pROC")
+sapply(libs,require,character.only = T, quietly = TRUE, warn.conflicts = FALSE)
+```
+
+```{r function files}
+require(knitr,quietly=TRUE,warn.conflicts = FALSE)
+knit("PredictEpidemicTools.Rmd",quiet = TRUE)
+```
+
+```{r parallel coding settings}
+detectCores()
+cl <- makeCluster(3) #set for 4 cores
+
+registerDoParallel(cl)
+
+getDoParWorkers()
+```
+
+## Import the simulated data
+
+```{r import simulated data}
+simul.dataU_Gumbel <- read.csv("SimulatedDataWeek3.csv", row.names = 1)
+
+nb.epid_simus <- dim(simul.dataU_Gumbel)[1] / (33*3)
+d <- dim(simul.dataU_Gumbel)[2]
+```
+
+## Parameters of the fitted Gumbel model 
+
+```{r parameters}
+est.param <-
+  read.csv(
+    "EstimatesParametersWeek3.csv",
+    row.names = 1
+  )
+alpha <- as.matrix(est.param)[1, ]
+beta <- as.matrix(est.param)[2, ]
+```
+
+## Preparation of the data
+
+```{r serfling}
+season_data <- unique(simul.dataU_Gumbel$season)
+simul_excess_stand_matrix <-
+  matrix(simul.dataU_Gumbel$excess, ncol = d, byrow = T)
+n <- dim(simul_excess_stand_matrix)[1]
+
+nb_replicates <- n / 33 ##nb of datasets of 33 epidemics
+split_index <- split(1:n, 1:nb_replicates)
+```
+
+## Define train sets
+
+```{r train sets}
+n_train <- 32
+n_test <- 1
+
+excess_list <- list()
+for (i in 1:nb_replicates) {
+  excess_list[[i]] <- simul_excess_stand_matrix[split_index[[i]],]
+}
+```
+
+## Parallel fit of a Gumbel model for each train set
+
+```{r parallel fit }
+Res.fit_parallel <- foreach(
+  i = 1:nb_replicates,
+  .packages = c("extRemes","brglm", "pracma"),
+  .combine = rbind) %dopar% {
+  FitParallelSimus(i,excess_list = excess_list)
+}
+
+res.fitSimus_week3 <- data.frame(Res.fit_parallel)
+colnames(res.fitSimus_week3) <- c("Indice", "alpha1", "alpha2","alpha3", "beta1", "beta2", "beta3","LLK")
+
+```
+
+## Lists of estimated parameters
+
+```{r estimated parameters}
+est.alpha_list <- list()
+for (i in 1:nb_replicates) {
+  est.alpha_list [[i]] <-
+    c(
+      res.fitSimus_week3[i,]$alpha1,
+      res.fitSimus_week3[i,]$alpha2,
+      res.fitSimus_week3[i,]$alpha3
+    )
+}
+
+est.beta_list <- list()
+for (i in 1:nb_replicates) {
+  est.beta_list [[i]] <-
+    c(
+      res.fitSimus_week3[i,]$beta1,
+      res.fitSimus_week3[i,]$beta2,
+      res.fitSimus_week3[i,]$beta3
+    )
+}
+```
+
+
+## Get fixed prediction thresholds
+```{r pred thresholds}
+thres_pred <-
+  read.csv(
+    "FixedPredThres.csv",
+    row.names = 1
+  )
+thres_pred <- as.vector(t(thres_pred))
+```
+
+
+## Parallel prediction for each simulated data set
+
+```{r parallel pred Week 3}
+res_parallel <- foreach(
+  i = 1:nb_replicates,
+  .packages = c("extRemes",  "pracma"),
+  .combine = rbind
+) %dopar% {
+  PredParallelSimus(i, split_index = split_index)
+}
+
+
+res_week3 <- data.frame(res_parallel)
+colnames(res_week3) <-
+  c(
+    "Week3",
+    "Predict_Gumbel_05",
+    "Predict_Gumbel_075",
+    "Predict_Gumbel_095",
+    "Predict_Gumbel_1",
+    "Predict_Gumbel_12",
+    "Predict_Logit_05",
+    "Predict_Logit_075",
+    "Predict_Logit_095",
+    "Predict_Logit_1",
+    "Predict_Logit_12",
+    "LLK"
+  )
+```
+
+
+## Prediction with true model
+
+```{r pred parallel true}
+res_parallel_true <- foreach(
+  i = 1:nb_replicates,
+  .packages = c("extRemes",  "pracma"),
+  .combine = rbind
+) %dopar% {
+  PredParallelTrue(i, split_index = split_index)
+}
+
+
+res_true_week3 <- data.frame(res_parallel_true)
+colnames(res_true_week3) <-
+  c(
+    "Week3",
+    "Predict_True_05",
+    "Predict_True_075",
+    "Predict_True_095",
+    "Predict_True_1",
+    "Predict_True_12"
+  )
+
+res_week3 <- cbind(res_week3, res_true_week3[, -1])
+```
+
+
+## Brier plots (Figures 6 and 7)
+
+### Threshold = 0.5 $\times$ max = 816
+
+#### Figure 6 a) 
+```{r logistic brierplot05}
+res_week3_05 <-
+  subset(res_week3,
+         select = c(Week3, Predict_Gumbel_05, Predict_Logit_05, Predict_True_05))
+res_week3_05$Outcome <-
+  as.numeric(res_week3_05$Week3 > thres_pred[1])
+
+x.plot <-
+  ggplot(data = res_week3_05, aes(x = as.factor(Outcome), y = Predict_Gumbel_05))
+x.plot <-
+  x.plot + geom_boxplot(outlier.size = 0.5,
+                        outlier.shape = 1,
+                        size = 0.5)
+x.plot <- x.plot + ggtitle("GP prediction")
+x.plot <-
+  x.plot + xlab("Outcome") + ylab("Prediction probability")
+x.plot <- x.plot + theme(
+  panel.grid.minor = element_blank(),
+  text = element_text(size = 10),
+  axis.text.x = element_text(size = 8),
+  axis.text.y = element_text(size = 8),
+  plot.title = element_text(size = 10)
+)
+x.plot
+
+y.plot <-
+  ggplot(data = res_week3_05, aes(x = as.factor(Outcome), y = Predict_Logit_05))
+y.plot <-
+  y.plot +  geom_boxplot(outlier.size = 0.5,
+                         outlier.shape = 1,
+                         size = 0.5)
+y.plot <- y.plot + ggtitle("Logistic regression")
+y.plot <-
+  y.plot + xlab("Outcome") + ylab("Prediction probability")
+y.plot <- y.plot + theme(
+  panel.grid.minor = element_blank(),
+  text = element_text(size = 10),
+  axis.text.x = element_text(size = 8),
+  axis.text.y = element_text(size = 8),
+  plot.title = element_text(size = 10)
+)
+
+z.plot <- grid.arrange(x.plot, y.plot, ncol = 2)
+```
+
+### Figure 7a)
+```{r true brierplot05}
+x.plot <-
+  ggplot(data = res_week3_05, aes(x = as.factor(Outcome), y = Predict_Gumbel_05))
+x.plot <-
+  x.plot + geom_boxplot(outlier.size = 0.5,
+                        outlier.shape = 1,
+                        size = 0.5)
+x.plot <- x.plot + ggtitle("Estimated model")
+x.plot <-
+  x.plot + xlab("Outcome") + ylab("Prediction probability")
+x.plot <- x.plot + theme(
+  panel.grid.minor = element_blank(),
+  text = element_text(size = 10),
+  axis.text.x = element_text(size = 8),
+  axis.text.y = element_text(size = 8),
+  plot.title = element_text(size = 10)
+)
+x.plot
+
+y.plot <-
+  ggplot(data = res_week3_05, aes(x = as.factor(Outcome), y = Predict_True_05))
+y.plot <-
+  y.plot +  geom_boxplot(outlier.size = 0.5,
+                         outlier.shape = 1,
+                         size = 0.5)
+y.plot <- y.plot + ggtitle("True model")
+y.plot <-
+  y.plot + xlab("Outcome") + ylab("Prediction probability")
+y.plot <- y.plot + theme(
+  panel.grid.minor = element_blank(),
+  text = element_text(size = 10),
+  axis.text.x = element_text(size = 8),
+  axis.text.y = element_text(size = 8),
+  plot.title = element_text(size = 10)
+)
+
+z.plot <- grid.arrange(x.plot, y.plot, ncol = 2)
+```
+
+### Threshold = 0.75 $\times$ max = 1,224
+
+#### Figure 6 b) 
+```{r logistic brierplot075}
+res_week3_075 <-
+  subset(res_week3,
+         select = c(
+           Week3,
+           Predict_Gumbel_075,
+           Predict_Logit_075,
+           Predict_True_075
+         ))
+res_week3_075$Outcome <-
+  as.numeric(res_week3_075$Week3 > thres_pred[2])
+
+
+x.plot <-
+  ggplot(data = res_week3_075, aes(x = as.factor(Outcome), y = Predict_Gumbel_075))
+x.plot <-
+  x.plot + geom_boxplot(outlier.size = 0.5,
+                        outlier.shape = 1,
+                        size = 0.5)
+x.plot <- x.plot + ggtitle("GP prediction")
+x.plot <-
+  x.plot + xlab("Outcome") + ylab("Prediction probability")
+x.plot <- x.plot + theme(
+  panel.grid.minor = element_blank(),
+  text = element_text(size = 10),
+  axis.text.x = element_text(size = 8),
+  axis.text.y = element_text(size = 8),
+  plot.title = element_text(size = 10)
+)
+x.plot
+
+y.plot <-
+  ggplot(data = res_week3_075, aes(x = as.factor(Outcome), y = Predict_Logit_075))
+y.plot <-
+  y.plot + geom_boxplot(outlier.size = 0.5,
+                        outlier.shape = 1,
+                        size = 0.5)
+y.plot <- y.plot + ggtitle("Logistic model")
+y.plot <-
+  y.plot + xlab("Outcome") + ylab("Prediction probability")
+y.plot <- y.plot + theme(
+  panel.grid.minor = element_blank(),
+  text = element_text(size = 10),
+  axis.text.x = element_text(size = 8),
+  axis.text.y = element_text(size = 8),
+  plot.title = element_text(size = 10)
+)
+
+
+z.plot <- grid.arrange(x.plot, y.plot, ncol = 2)
+```
+
+### Figure 7b)
+```{r true brierplot075}
+x.plot <-
+  ggplot(data = res_week3_075, aes(x = as.factor(Outcome), y = Predict_Gumbel_075))
+x.plot <-
+  x.plot + geom_boxplot(outlier.size = 0.5,
+                        outlier.shape = 1,
+                        size = 0.5)
+x.plot <- x.plot + ggtitle("Estimated model")
+x.plot <-
+  x.plot + xlab("Outcome") + ylab("Prediction probability")
+x.plot <- x.plot + theme(
+  panel.grid.minor = element_blank(),
+  text = element_text(size = 10),
+  axis.text.x = element_text(size = 8),
+  axis.text.y = element_text(size = 8),
+  plot.title = element_text(size = 10)
+)
+x.plot
+
+y.plot <-
+  ggplot(data = res_week3_075, aes(x = as.factor(Outcome), y = Predict_True_075))
+y.plot <-
+  y.plot +  geom_boxplot(outlier.size = 0.5,
+                         outlier.shape = 1,
+                         size = 0.5)
+y.plot <- y.plot + ggtitle("True model")
+y.plot <-
+  y.plot + xlab("Outcome") + ylab("Prediction probability")
+y.plot <- y.plot + theme(
+  panel.grid.minor = element_blank(),
+  text = element_text(size = 10),
+  axis.text.x = element_text(size = 8),
+  axis.text.y = element_text(size = 8),
+  plot.title = element_text(size = 10)
+)
+
+z.plot <- grid.arrange(x.plot, y.plot, ncol = 2)
+```
+
+### Threshold = 0.95 $\times$ max = 1,551 (not shown in the paper)
+```{r logistic brierplot095}
+res_week3_095 <-
+  subset(res_week3,
+         select = c(
+           Week3,
+           Predict_Gumbel_095,
+           Predict_Logit_095,
+           Predict_True_095
+         ))
+res_week3_095$Outcome <-
+  as.numeric(res_week3_095$Week3 > thres_pred[3])
+
+x.plot <-
+  ggplot(data = res_week3_095, aes(x = as.factor(Outcome), y = Predict_Gumbel_095))
+x.plot <-
+  x.plot + geom_boxplot(outlier.size = 0.5,
+                        outlier.shape = 1,
+                        size = 0.5)
+x.plot <- x.plot + ggtitle("Estimated model")
+x.plot <-
+  x.plot + xlab("Outcome") + ylab("Prediction probability")
+x.plot <- x.plot + theme(
+  panel.grid.minor = element_blank(),
+  text = element_text(size = 10),
+  axis.text.x = element_text(size = 8),
+  axis.text.y = element_text(size = 8),
+  plot.title = element_text(size = 10)
+)
+x.plot
+
+y.plot <-
+  ggplot(data = res_week3_095, aes(x = as.factor(Outcome), y = Predict_Logit_095))
+y.plot <-
+  y.plot +  geom_boxplot(outlier.size = 0.5,
+                         outlier.shape = 1,
+                         size = 0.5)
+y.plot <- y.plot + ggtitle("Logistic regression")
+y.plot <-
+  y.plot + xlab("Outcome") + ylab("Prediction probability")
+y.plot <- y.plot + theme(
+  panel.grid.minor = element_blank(),
+  text = element_text(size = 10),
+  axis.text.x = element_text(size = 8),
+  axis.text.y = element_text(size = 8),
+  plot.title = element_text(size = 10)
+)
+
+
+z.plot <- grid.arrange(x.plot, y.plot, ncol = 2)
+```
+
+#### Figure 7c)
+```{r true brierplot095}
+x.plot <-
+  ggplot(data = res_week3_095, aes(x = as.factor(Outcome), y = Predict_Gumbel_095))
+x.plot <-
+  x.plot + geom_boxplot(outlier.size = 0.5,
+                        outlier.shape = 1,
+                        size = 0.5)
+x.plot <- x.plot + ggtitle("Estimated model")
+x.plot <-
+  x.plot + xlab("Outcome") + ylab("Prediction probability")
+x.plot <- x.plot + theme(
+  panel.grid.minor = element_blank(),
+  text = element_text(size = 10),
+  axis.text.x = element_text(size = 8),
+  axis.text.y = element_text(size = 8),
+  plot.title = element_text(size = 10)
+)
+x.plot
+
+y.plot <-
+  ggplot(data = res_week3_095, aes(x = as.factor(Outcome), y = Predict_True_095))
+y.plot <-
+  y.plot +  geom_boxplot(outlier.size = 0.5,
+                         outlier.shape = 1,
+                         size = 0.5)
+y.plot <- y.plot + ggtitle("True model ")
+y.plot <-
+  y.plot + xlab("Outcome") + ylab("Prediction probability")
+y.plot <- y.plot + theme(
+  panel.grid.minor = element_blank(),
+  text = element_text(size = 10),
+  axis.text.x = element_text(size = 8),
+  axis.text.y = element_text(size = 8),
+  plot.title = element_text(size = 10)
+)
+
+
+z.plot <- grid.arrange(x.plot, y.plot, ncol = 2)
+```
+
+### Threshold = 1 $\times$ max = 1,632
+
+
+
+#### Figure 7d)
+```{r true brierplot1}
+res_week3_1 <-
+  subset(res_week3, select = c(Week3, Predict_Gumbel_1, Predict_True_1))
+res_week3_1$Outcome <- as.numeric(res_week3_1$Week3 > thres_pred[4])
+
+x.plot <-
+  ggplot(data = res_week3_1, aes(x = as.factor(Outcome), y = Predict_Gumbel_1))
+x.plot <-
+  x.plot + geom_boxplot(outlier.size = 0.5,
+                        outlier.shape = 1,
+                        size = 0.5)
+x.plot <- x.plot + ggtitle("Estimated model")
+x.plot <-
+  x.plot + xlab("Outcome") + ylab("Prediction probability")
+x.plot <- x.plot + theme(
+  panel.grid.minor = element_blank(),
+  text = element_text(size = 10),
+  axis.text.x = element_text(size = 8),
+  axis.text.y = element_text(size = 8),
+  plot.title = element_text(size = 10)
+)
+
+y.plot <-
+  ggplot(data = res_week3_1, aes(x = as.factor(Outcome), y = Predict_True_1))
+y.plot <-
+  y.plot +  geom_boxplot(outlier.size = 0.5,
+                         outlier.shape = 1,
+                         size = 0.5)
+y.plot <- y.plot + ggtitle("True model ")
+y.plot <-
+  y.plot + xlab("Outcome") + ylab("Prediction probability")
+y.plot <- y.plot + theme(
+  panel.grid.minor = element_blank(),
+  text = element_text(size = 10),
+  axis.text.x = element_text(size = 8),
+  axis.text.y = element_text(size = 8),
+  plot.title = element_text(size = 10)
+)
+
+
+z.plot <- grid.arrange(x.plot, y.plot, ncol = 2)
+```
+
+
+### Threshold = 1.2 $\times$ max = 1,959 (not shown in the paper)
+```{r true brierplot12}
+res_week3_12 <-
+  subset(res_week3, select = c(Week3, Predict_Gumbel_12, Predict_True_12))
+res_week3_12$Outcome <-
+  as.numeric(res_week3_12$Week3 > thres_pred[5])
+
+x.plot <-
+  ggplot(data = res_week3_12, aes(x = as.factor(Outcome), y = Predict_Gumbel_12))
+x.plot <-
+  x.plot + geom_boxplot(outlier.size = 0.5,
+                        outlier.shape = 1,
+                        size = 0.5)
+x.plot <- x.plot + ggtitle("GP prediction")
+x.plot <-
+  x.plot + xlab("Outcome") + ylab("Prediction probability")
+x.plot <- x.plot + theme(
+  panel.grid.minor = element_blank(),
+  text = element_text(size = 10),
+  axis.text.x = element_text(size = 8),
+  axis.text.y = element_text(size = 8),
+  plot.title = element_text(size = 10)
+)
+
+
+y.plot <-
+  ggplot(data = res_week3_12, aes(x = as.factor(Outcome), y = Predict_True_12))
+y.plot <-
+  y.plot +  geom_boxplot(outlier.shape = 1, size = 0.5)
+y.plot <- y.plot + ggtitle("True model ")
+y.plot <-
+  y.plot + xlab("Outcome") + ylab("Prediction probability")
+y.plot <- y.plot + theme(
+  panel.grid.minor = element_blank(),
+  text = element_text(size = 10),
+  axis.text.x = element_text(size = 8),
+  axis.text.y = element_text(size = 8),
+  plot.title = element_text(size = 10)
+)
+z.plot <- grid.arrange(x.plot, y.plot, ncol = 2)
+```
+
+## Brier scores (Table 9a))
+```{r brier scores}
+##0.5
+p_05 <- mean(res_week3_05$Outcome)
+brier_gumbel_05 <-
+  1 - mean((res_week3_05$Predict_Gumbel_05 - res_week3_05$Outcome) ^ 2) /
+  (p_05 * (1 - p_05))
+brier_logit_05 <-
+  1 - mean((res_week3_05$Predict_Logit_05 - res_week3_05$Outcome) ^ 2,
+           na.rm = T) /
+ (p_05 * (1 - p_05))
+brier_true_05 <-
+  1 - mean((res_week3_05$Predict_True_05 - res_week3_05$Outcome) ^ 2,
+           na.rm = T) /
+   (p_05 * (1 - p_05))
+
+##0.75
+p_075 <- mean(res_week3_075$Outcome)
+brier_gumbel_075 <-
+  1 - mean((res_week3_075$Predict_Gumbel_075 - res_week3_075$Outcome) ^ 2) /
+   (p_075 * (1 - p_075))
+brier_logit_075 <-
+  1 - mean((res_week3_075$Predict_Logit_075 - res_week3_075$Outcome) ^ 2,
+           na.rm = T) /
+ (p_075 * (1 - p_075))
+brier_true_075 <-
+  1 - mean((res_week3_075$Predict_True_075 - res_week3_075$Outcome) ^ 2,
+           na.rm = T) /
+(p_075 * (1 - p_075))
+
+
+##0.95
+p_095 <- mean(res_week3_095$Outcome)
+brier_gumbel_095 <-
+  1 - mean((res_week3_095$Predict_Gumbel_095 - res_week3_095$Outcome) ^ 2) /
+  (p_095 * (1 - p_095))
+brier_logit_095 <-
+  1 - mean((res_week3_095$Predict_Logit_095 - res_week3_095$Outcome) ^ 2,
+           na.rm = T) /
+(p_095 * (1 - p_095))
+brier_true_095 <-
+  1 - mean((res_week3_095$Predict_True_095 - res_week3_095$Outcome) ^ 2,
+           na.rm = T) /
+(p_095 * (1 - p_095))
+
+##1
+p_1 <- mean(res_week3_1$Outcome)
+brier_gumbel_1 <-
+  1 - mean((res_week3_1$Predict_Gumbel_1 - res_week3_1$Outcome) ^ 2) /
+  (p_1 * (1 - p_1))
+brier_true_1 <-
+  1 - mean((res_week3_1$Predict_True_1 - res_week3_1$Outcome) ^ 2) /
+   (p_1 * (1 - p_1))
+
+##1.2
+p_12 <- mean(res_week3_12$Outcome)
+brier_gumbel_12 <-
+  1 - mean((res_week3_12$Predict_Gumbel_12 - res_week3_12$Outcome) ^ 2) /
+  (p_12 * (1 - p_12))
+brier_true_12 <-
+  1 - mean((res_week3_12$Predict_True_12 - res_week3_12$Outcome) ^ 2) /
+  (p_12 * (1 - p_12))
+```
+
+```{r table9a}
+table9 <- data.frame(matrix(c(0.5, 0.75, 0.95, 1, 1.2, brier_gumbel_05, brier_gumbel_075, brier_gumbel_095, brier_gumbel_1, brier_gumbel_12, brier_logit_05, brier_logit_075, brier_logit_095, NA, NA,brier_true_05, brier_true_075, brier_true_095, brier_true_1, brier_true_12), byrow = T, ncol = 5))
+rownames(table9) <- c("Multiple", "GP", "Logistic", "True")
+kable(table9)
+```
+
+## ROC and AUC (not shown in the paper)
+
+### Threshold = 0.5 $\times$ max = 816
+
+```{r roc05}
+dis.thres_LOGIT <- sort(res_week3_05$Predict_Logit_05)
+roc.data_LOGIT <-
+  data.frame(DisThres = dis.thres_LOGIT, Model = rep("Logistic", length(dis.thres_LOGIT)))
+for (i in 1:length(dis.thres_LOGIT)) {
+  roc.data_LOGIT$TP[i] <-
+    sum((res_week3_05$Predict_Logit_05 > dis.thres_LOGIT[i]) &
+          (res_week3_05$Outcome == 1),
+        na.rm = T
+    ) / sum(res_week3_05$Outcome == 1)
+  roc.data_LOGIT$FP[i] <-
+    sum((res_week3_05$Predict_Logit_05 > dis.thres_LOGIT[i]) &
+          (res_week3_05$Outcome == 0),
+        na.rm = T
+    ) / sum(res_week3_05$Outcome == 0)
+}
+
+
+dis.thres_MGPD <- sort(res_week3_05$Predict_Gumbel_05)
+roc.data_MGPD <-
+  data.frame(DisThres = c(dis.thres_MGPD),
+             Model = rep("Gumbel", length(dis.thres_MGPD)))
+
+for (i in 1:length(dis.thres_MGPD)) {
+  roc.data_MGPD$TP[i] <-
+    sum((res_week3_05$Predict_Gumbel_05 > dis.thres_MGPD[i]) &
+          (res_week3_05$Outcome == 1)) / sum(res_week3_05$Outcome == 1)
+  roc.data_MGPD$FP[i] <-
+    sum((res_week3_05$Predict_Gumbel_05 > dis.thres_MGPD[i]) &
+          (res_week3_05$Outcome == 0)) / sum(res_week3_05$Outcome == 0)
+}
+
+dis.thres_TRUE <- sort(res_week3_05$Predict_True_05)
+roc.data_TRUE <-
+  data.frame(DisThres = dis.thres_TRUE, Model = rep("True", length(dis.thres_TRUE)))
+for (i in 1:length(dis.thres_TRUE)) {
+  roc.data_TRUE$TP[i] <-
+    sum((res_week3_05$Predict_True_05 > dis.thres_TRUE[i]) &
+          (res_week3_05$Outcome == 1),
+        na.rm = T
+    ) / sum(res_week3_05$Outcome == 1)
+  roc.data_TRUE$FP[i] <-
+    sum((res_week3_05$Predict_True_05 > dis.thres_TRUE[i]) &
+          (res_week3_05$Outcome == 0),
+        na.rm = T
+    ) / sum(res_week3_05$Outcome == 0)
+}
+
+roc.data <- rbind(roc.data_MGPD, roc.data_LOGIT, roc.data_TRUE)
+
+
+x.plot <-
+  ggplot(data = roc.data, aes(
+    x = FP,
+    y = TP,
+    colour = Model,
+    linetype = Model
+  )) + geom_path()
+x.plot <- x.plot + geom_abline(intercept = 0, slope = 1)
+x.plot <- x.plot + xlim(c(0, 1)) + ylim(c(0, 1))
+x.plot <- x.plot + scale_color_manual(values = c("blue", "red", "orange"))
+x.plot <- x.plot + xlab("False positives") + ylab("True positives")
+x.plot <- x.plot + theme(
+  panel.grid.minor = element_blank(),
+  text = element_text(size = 10),
+  axis.text.x = element_text(size = 8),
+  axis.text.y = element_text(size = 8),
+  plot.title = element_text(size = 10)
+)
+x.plot
+
+
+## AUC ###
+auc_GP_05 <- auc(roc(res_week3_05$Outcome, res_week3_05$Predict_Gumbel_05))
+auc_Logit_05 <- auc(roc(res_week3_05$Outcome, res_week3_05$Predict_Logit_05))
+auc_True_05 <- auc(roc(res_week3_05$Outcome, res_week3_05$Predict_True_05))
+
+kable(data.frame(c(auc_GP_05, auc_Logit_05, auc_True_05)))
+```
+
+
+### Threshold = 0.75 $\times$ max = 1,224
+
+```{r roc075}
+dis.thres_LOGIT <- sort(res_week3_075$Predict_Logit_075)
+roc.data_LOGIT <-
+  data.frame(DisThres = dis.thres_LOGIT, Model = rep("Logistic", length(dis.thres_LOGIT)))
+for (i in 1:length(dis.thres_LOGIT)) {
+  roc.data_LOGIT$TP[i] <-
+    sum((res_week3_075$Predict_Logit_075 > dis.thres_LOGIT[i]) &
+          (res_week3_075$Outcome == 1),
+        na.rm = T
+    ) / sum(res_week3_075$Outcome == 1)
+  roc.data_LOGIT$FP[i] <-
+    sum((res_week3_075$Predict_Logit_075 > dis.thres_LOGIT[i]) &
+          (res_week3_075$Outcome == 0),
+        na.rm = T
+    ) / sum(res_week3_075$Outcome == 0)
+}
+
+
+dis.thres_MGPD <- sort(res_week3_075$Predict_Gumbel_075)
+roc.data_MGPD <-
+  data.frame(DisThres = c(dis.thres_MGPD),
+             Model = rep("Gumbel", length(dis.thres_MGPD)))
+
+for (i in 1:length(dis.thres_MGPD)) {
+  roc.data_MGPD$TP[i] <-
+    sum((res_week3_075$Predict_Gumbel_075 > dis.thres_MGPD[i]) &
+          (res_week3_075$Outcome == 1)) / sum(res_week3_075$Outcome == 1)
+  roc.data_MGPD$FP[i] <-
+    sum((res_week3_075$Predict_Gumbel_075 > dis.thres_MGPD[i]) &
+          (res_week3_075$Outcome == 0)) / sum(res_week3_075$Outcome == 0)
+}
+
+dis.thres_TRUE <- sort(res_week3_075$Predict_True_075)
+roc.data_TRUE <-
+  data.frame(DisThres = dis.thres_TRUE, Model = rep("True", length(dis.thres_TRUE)))
+for (i in 1:length(dis.thres_TRUE)) {
+  roc.data_TRUE$TP[i] <-
+    sum((res_week3_075$Predict_True_075 > dis.thres_TRUE[i]) &
+          (res_week3_075$Outcome == 1),
+        na.rm = T
+    ) / sum(res_week3_075$Outcome == 1)
+  roc.data_TRUE$FP[i] <-
+    sum((res_week3_075$Predict_True_075 > dis.thres_TRUE[i]) &
+          (res_week3_075$Outcome == 0),
+        na.rm = T
+    ) / sum(res_week3_075$Outcome == 0)
+}
+
+roc.data <- rbind(roc.data_MGPD, roc.data_LOGIT, roc.data_TRUE)
+
+
+x.plot <-
+  ggplot(data = roc.data, aes(
+    x = FP,
+    y = TP,
+    colour = Model,
+    linetype = Model
+  )) + geom_path()
+x.plot <- x.plot + geom_abline(intercept = 0, slope = 1)
+x.plot <- x.plot + xlim(c(0, 1)) + ylim(c(0, 1))
+x.plot <- x.plot + scale_color_manual(values = c("blue", "red", "orange"))
+x.plot <- x.plot + xlab("False positives") + ylab("True positives")
+x.plot <- x.plot + theme(
+  panel.grid.minor = element_blank(),
+  text = element_text(size = 10),
+  axis.text.x = element_text(size = 8),
+  axis.text.y = element_text(size = 8),
+  plot.title = element_text(size = 10)
+)
+x.plot
+
+
+
+## AUC ###
+auc_GP_075 <- auc(roc(res_week3_075$Outcome, res_week3_075$Predict_Gumbel_075))
+auc_Logit_075 <- auc(roc(res_week3_075$Outcome, res_week3_075$Predict_Logit_075))
+auc_True_075 <- auc(roc(res_week3_075$Outcome, res_week3_075$Predict_True_075))
+
+kable(data.frame(c(auc_GP_075, auc_Logit_075, auc_True_075)))
+```
+
+### Threshold = 0.95 $\times$ max = 1,551
+
+```{r roc095}
+dis.thres_LOGIT <- sort(res_week3_095$Predict_Logit_095)
+roc.data_LOGIT <-
+  data.frame(DisThres = dis.thres_LOGIT, Model = rep("Logistic", length(dis.thres_LOGIT)))
+for (i in 1:length(dis.thres_LOGIT)) {
+  roc.data_LOGIT$TP[i] <-
+    sum((res_week3_095$Predict_Logit_095 > dis.thres_LOGIT[i]) &
+          (res_week3_095$Outcome == 1),
+        na.rm = T
+    ) / sum(res_week3_095$Outcome == 1)
+  roc.data_LOGIT$FP[i] <-
+    sum((res_week3_095$Predict_Logit_095 > dis.thres_LOGIT[i]) &
+          (res_week3_095$Outcome == 0),
+        na.rm = T
+    ) / sum(res_week3_095$Outcome == 0)
+}
+
+
+dis.thres_MGPD <- sort(res_week3_095$Predict_Gumbel_095)
+roc.data_MGPD <-
+  data.frame(DisThres = c(dis.thres_MGPD),
+             Model = rep("Gumbel", length(dis.thres_MGPD)))
+
+for (i in 1:length(dis.thres_MGPD)) {
+  roc.data_MGPD$TP[i] <-
+    sum((res_week3_095$Predict_Gumbel_095 > dis.thres_MGPD[i]) &
+          (res_week3_095$Outcome == 1)) / sum(res_week3_095$Outcome == 1)
+  roc.data_MGPD$FP[i] <-
+    sum((res_week3_095$Predict_Gumbel_095 > dis.thres_MGPD[i]) &
+          (res_week3_095$Outcome == 0)) / sum(res_week3_095$Outcome == 0)
+}
+
+dis.thres_TRUE <- sort(res_week3_095$Predict_True_095)
+roc.data_TRUE <-
+  data.frame(DisThres = dis.thres_TRUE, Model = rep("True", length(dis.thres_TRUE)))
+for (i in 1:length(dis.thres_TRUE)) {
+  roc.data_TRUE$TP[i] <-
+    sum((res_week3_095$Predict_True_095 > dis.thres_TRUE[i]) &
+          (res_week3_095$Outcome == 1),
+        na.rm = T
+    ) / sum(res_week3_095$Outcome == 1)
+  roc.data_TRUE$FP[i] <-
+    sum((res_week3_095$Predict_True_095 > dis.thres_TRUE[i]) &
+          (res_week3_095$Outcome == 0),
+        na.rm = T
+    ) / sum(res_week3_095$Outcome == 0)
+}
+
+roc.data <- rbind(roc.data_MGPD, roc.data_LOGIT, roc.data_TRUE)
+
+
+x.plot <-
+  ggplot(data = roc.data, aes(
+    x = FP,
+    y = TP,
+    colour = Model,
+    linetype = Model
+  )) + geom_path()
+x.plot <- x.plot + geom_abline(intercept = 0, slope = 1)
+x.plot <- x.plot + xlim(c(0, 1)) + ylim(c(0, 1))
+x.plot <- x.plot + scale_color_manual(values = c("blue", "red", "orange"))
+x.plot <- x.plot + xlab("False positives") + ylab("True positives")
+x.plot <- x.plot + theme(
+  panel.grid.minor = element_blank(),
+  text = element_text(size = 10),
+  axis.text.x = element_text(size = 8),
+  axis.text.y = element_text(size = 8),
+  plot.title = element_text(size = 10)
+)
+x.plot
+
+
+
+## AUC ###
+auc_GP_095 <- auc(roc(res_week3_095$Outcome, res_week3_095$Predict_Gumbel_095))
+auc_Logit_095 <- auc(roc(res_week3_095$Outcome, res_week3_095$Predict_Logit_095))
+auc_True_095 <- auc(roc(res_week3_095$Outcome, res_week3_095$Predict_True_095))
+
+kable(data.frame(c(auc_GP_095, auc_Logit_095, auc_True_095)))
+```
+
+### Threshold = 1 $\times$ max = 1,632
+
+```{r true roc1}
+dis.thres_MGPD <- sort(res_week3_1$Predict_Gumbel_1)
+roc.data_MGPD <-
+  data.frame(DisThres = c(dis.thres_MGPD),
+             Model = rep("Gumbel", length(dis.thres_MGPD)))
+
+for (i in 1:length(dis.thres_MGPD)) {
+  roc.data_MGPD$TP[i] <-
+    sum((res_week3_1$Predict_Gumbel_1 > dis.thres_MGPD[i]) &
+          (res_week3_1$Outcome == 1)) / sum(res_week3_1$Outcome == 1)
+  roc.data_MGPD$FP[i] <-
+    sum((res_week3_1$Predict_Gumbel_1 > dis.thres_MGPD[i]) &
+          (res_week3_1$Outcome == 0)) / sum(res_week3_1$Outcome == 0)
+}
+
+dis.thres_TRUE <- sort(res_week3_1$Predict_True_1)
+roc.data_TRUE <-
+  data.frame(DisThres = c(dis.thres_TRUE),
+             Model = rep("True", length(dis.thres_TRUE)))
+
+for (i in 1:length(dis.thres_TRUE)) {
+  roc.data_TRUE$TP[i] <-
+    sum((res_week3_1$Predict_True_1 > dis.thres_TRUE[i]) &
+          (res_week3_1$Outcome == 1)) / sum(res_week3_1$Outcome == 1)
+  roc.data_TRUE$FP[i] <-
+    sum((res_week3_1$Predict_True_1 > dis.thres_TRUE[i]) &
+          (res_week3_1$Outcome == 0)) / sum(res_week3_1$Outcome == 0)
+}
+
+roc.data <- rbind(roc.data_MGPD, roc.data_TRUE)
+
+x.plot <-
+  ggplot(data = roc.data, aes(
+    x = FP,
+    y = TP,
+    colour = Model,
+    linetype = Model
+  )) + geom_path()
+x.plot <- x.plot + geom_abline(intercept = 0, slope = 1)
+x.plot <- x.plot + xlim(c(0, 1)) + ylim(c(0, 1))
+x.plot <- x.plot + scale_color_manual(values = c("blue", "orange"))
+x.plot <- x.plot + xlab("False positives") + ylab("True positives")
+x.plot <- x.plot + theme(
+  panel.grid.minor = element_blank(),
+  text = element_text(size = 10),
+  axis.text.x = element_text(size = 8),
+  axis.text.y = element_text(size = 8),
+  plot.title = element_text(size = 10)
+)
+x.plot
+
+
+## AUC ###
+auc_GP_1 <- auc(roc(res_week3_1$Outcome, res_week3_1$Predict_Gumbel_1))
+auc_True_1 <- auc(roc(res_week3_1$Outcome, res_week3_1$Predict_True_1))
+
+kable(data.frame(c(auc_GP_1, auc_True_1)))
+```
+
+
+### Threshold = 1.2 $\times$ max = 1,959
+
+```{r true roc12}
+dis.thres_MGPD <- sort(res_week3_12$Predict_Gumbel_12)
+roc.data_MGPD <-
+  data.frame(DisThres = c(dis.thres_MGPD),
+             Model = rep("Gumbel", length(dis.thres_MGPD)))
+
+for (i in 1:length(dis.thres_MGPD)) {
+  roc.data_MGPD$TP[i] <-
+    sum((res_week3_12$Predict_Gumbel_12 > dis.thres_MGPD[i]) &
+          (res_week3_12$Outcome == 1)) / sum(res_week3_12$Outcome == 1)
+  roc.data_MGPD$FP[i] <-
+    sum((res_week3_12$Predict_Gumbel_1 > dis.thres_MGPD[i]) &
+          (res_week3_12$Outcome == 0)) / sum(res_week3_12$Outcome == 0)
+}
+
+
+dis.thres_TRUE <- sort(res_week3_12$Predict_True_12)
+roc.data_TRUE <-
+  data.frame(DisThres = c(dis.thres_TRUE),
+             Model = rep("True", length(dis.thres_TRUE)))
+
+for (i in 1:length(dis.thres_TRUE)) {
+  roc.data_TRUE$TP[i] <-
+    sum((res_week3_12$Predict_True_12 > dis.thres_TRUE[i]) &
+          (res_week3_12$Outcome == 1)) / sum(res_week3_12$Outcome == 1)
+  roc.data_TRUE$FP[i] <-
+    sum((res_week3_12$Predict_True_12 > dis.thres_TRUE[i]) &
+          (res_week3_12$Outcome == 0)) / sum(res_week3_12$Outcome == 0)
+}
+
+roc.data <- rbind(roc.data_MGPD, roc.data_TRUE)
+
+x.plot <-
+  ggplot(data = roc.data, aes(
+    x = FP,
+    y = TP,
+    colour = Model,
+    linetype = Model
+  )) + geom_path()
+x.plot <- x.plot + geom_abline(intercept = 0, slope = 1)
+x.plot <- x.plot + xlim(c(0, 1)) + ylim(c(0, 1))
+x.plot <- x.plot + scale_color_manual(values = c("blue", "orange"))
+x.plot <- x.plot + xlab("False positives") + ylab("True positives")
+x.plot <- x.plot + theme(
+  panel.grid.minor = element_blank(),
+  text = element_text(size = 10),
+  axis.text.x = element_text(size = 8),
+  axis.text.y = element_text(size = 8),
+  plot.title = element_text(size = 10)
+)
+x.plot
+
+
+## AUC ###
+auc_GP_12 <- auc(roc(res_week3_12$Outcome, res_week3_12$Predict_Gumbel_12))
+auc_True_12 <- auc(roc(res_week3_12$Outcome, res_week3_12$Predict_True_12))
+
+
+kable(data.frame(c(auc_GP_12, auc_True_12)))
+```
