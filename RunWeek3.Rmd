@@ -1,15 +1,24 @@
 ---
-title: "Codes for prediction of Week 3"
+title: "Codes for prediction of ILI incidence rates of Week 3"
 output:
   html_document:
     df_print: paged
+    fig_caption : yes
 ---
 
 ## Preamble
-
+```{r options}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE,  fig.path = "figures/", fig.height=6.51,fig.width=8.49, dev='png', fig.process = function(filename) {
+    new_filename <- stringr::str_remove(string = filename,
+                                        pattern = "-1")
+    fs::file_move(path = filename, new_path = new_filename)
+    ifelse(fs::file_exists(new_filename), new_filename, filename)
+  })
+set.seed(29106799)
+```
 
 ```{r setting packages}
-libs <- c("ggplot2", "pracma", "brglm", "extRemes", "foreach", "doParallel", "gridExtra", "ismev")
+libs <- c("ggplot2", "pracma", "glmnet", "extRemes", "foreach", "doParallel", "gridExtra", "pROC", "MLmetrics", "energy")
 sapply(libs,require,character.only = T, quietly = TRUE, warn.conflicts = FALSE)
 ```
 
@@ -20,13 +29,13 @@ knit("PredictEpidemicTools.Rmd",quiet = TRUE)
 
 ```{r parallel coding settings}
 detectCores()
-cl <- makeCluster(3) #set for 4 cores
+cl <- makeCluster(7) #set to number of cores -1
 
 registerDoParallel(cl)
 
 getDoParWorkers()
 ```
-## Section 3 : The ILI data
+## Section 2 : The ILI data
 
 ### Preparation of the data 
 
@@ -48,94 +57,75 @@ seq(1, length = length(incidences$year), by = 1)
 
 incidences <-
 incidences[-228, ] # Missing data on the original file.
-
 ```
 
-#### Epidemic detection : Serfling method
 
-```{r serfling}
-debut_serfling <- c()
-fin_serfling <- c()
-seasonal.mean <- c()
-up.serfling <- c()
+###  Sentinelles epidemics
+```{r sentinelles durations}
 
-for (s in 1986:2020) {
-inc <- subset(incidences, season < s)
-nb.epid <- length(unique(inc$season))
-nonepid_inc <- subset(inc, t_inc < 279)
-reg <- lm(
-t_inc ~ weeknum + cos(2 * pi * weeknum / 52)
-+ sin(2 * pi * weeknum / 52) + cos(4 * pi * weeknum / 52)
-+ sin(4 * pi * weeknum / 52),
-data = nonepid_inc
-)
+debut_sentinelles <- c()
+fin_sentinelles <- c()
 
-new <- data.frame(weeknum = inc$weeknum)
-df.serfling <-
-predict(reg,
-newdata = new,
-interval = "prediction",
-level = 0.9)
-
-
-df.serfling <- as.data.frame(df.serfling)
-df.serfling$t_inc <- inc$t_inc
-
-inc$serfling <- df.serfling$fit
-inc$up_serfling <- df.serfling$upr
-df.serfling$dates <- inc$dates
-
-
-temp <- inc[inc$season == s - 1, ]
-temp.week <- temp[temp$t_inc >= temp$up_serfling, ]$weeknum
-if (length(temp.week) > 1) {
-for (j in 1:(length(temp.week) - 1)) {
-if ((temp.week[j] + 1 == temp.week[j + 1]) &
-(j < length(temp.week))) {
-debut_serfling <- c(debut_serfling, temp.week[j])
-
-break
-}
-}
-fin_serfling <-
-c(fin_serfling, temp.week[max(which(diff(temp.week) == 1)) + 1])
-}
-seasonal.mean <-
-c(seasonal.mean,  inc[inc$season == s - 1, ]$serfling)
-up.serfling <-
-c(up.serfling, inc[inc$season == s - 1, ]$up_serfling)
+for (i in unique(incidences$season)) {
+  temp <-
+    incidences[(incidences$epid == 1) &
+                     (incidences$season == i),]$weeknum
+  debut_sentinelles <- c(debut_sentinelles, min(temp))
+  fin_sentinelles <- c(fin_sentinelles, max(temp))
 }
 
+l.epid_serf <- fin_sentinelles - debut_sentinelles + 1
+longest <- max(l.epid_serf)
+shortest <- min(l.epid_serf)
 
-incidences$epid_serfling <- rep(0, length(incidences$t_inc))
-for (i in 1:nb.epid) {
-incidences[(incidences$weeknum >= debut_serfling[i]) &
-(incidences$weeknum <= fin_serfling[i]), ]$epid_serfling <-
-1
-}
+year_longest <- unique(incidences$season)[which.max(l.epid_serf)]
+year_shortest <- unique(incidences$season)[which.min(l.epid_serf)]
 ```
 
-#### Add the variable t_inc_cent to the data = deseasonalized rates
-```{r deseasonalized rates}
-incidences$s.mean <- seasonal.mean
-incidences$t_inc_cent <- incidences$t_inc - seasonal.mean
-incidences$up.serfling <- up.serfling
+
+In the Serfling definition of an epidemic, the shortest epidemic between 1985 and 2019 was `r shortest` weeks in `r year_shortest` and the longest `r longest` in `r year_longest` .
+
+
+```{r sentinelles peaks}
+d1 <- 1
+d2 <- longest
+sent_epid_data <-
+  EpidemicDataFrameSentinelles(data = incidences, d1 = d1, d2 = d2)
+
+peaks <- c()
+
+for (i in unique(sent_epid_data$season)) {
+  peaks <- c(peaks, max(sent_epid_data[sent_epid_data$season == i, ]$t_inc, na.rm = T))
+}
+
+highest_peaks <- max(peaks)
+lowest_peaks <- min(peaks)
+
+year_highest <- unique(incidences$season)[which.max(peaks)]
+year_lowest <- unique(incidences$season)[which.min(peaks)]
 ```
+
+In the Serfling definition of an epidemic, the value of the highest epidemic peak between 1985 and 2019 was `r highest_peaks` in `r year_highest` and the value of the lowest `r lowest_peaks` in `r lowest_peaks` .
 
 ### Figure 1
 
-```{r fig1, }
+```{r ILIdata}
 x.plot <-
-  ggplot(data = incidences, aes(x = incidences$dates, y = t_inc)) + geom_line(size = 0.3)
+  ggplot(data = incidences, aes(x = dates, y = t_inc)) + geom_line(size = 0.3)
   x.plot <-
-  x.plot + xlab("Years") + ylab("Incidence rates per 100,000")
+  x.plot + xlab("Years") + ylab("Incidence rates")
   x.plot <-
-  x.plot + scale_x_date(date_breaks = "2 years", date_labels = "%Y")
+  x.plot + scale_x_date(date_breaks = "3 years", date_labels = "%Y")
+ x.plot <- x.plot + geom_segment(aes(xend = as.Date("1989-01-01"), yend = 1850, x = as.Date("1989-01-01"), y = 1940),
+    arrow = arrow(length = unit(0.1,"cm")), col ='blue') 
+  x.plot <- x.plot + geom_segment(aes(xend = as.Date("2014-02-01"), yend = 375, x = as.Date("2014-02-01"), y = 480),
+    arrow = arrow(length = unit(0.1,"cm")), col ='blue') 
   x.plot <- x.plot + theme(
   panel.grid.minor = element_blank(),
-  text = element_text(size = 9),
-  axis.text.x = element_text(size = 7),
-  axis.text.y = element_text(size = 8)
+  text = element_text(size = 14),
+  axis.text.x = element_text(size = 10),
+  axis.text.y = element_text(size = 10),
+  plot.title = element_text(size = 14)
   )
   x.plot
 ```
@@ -150,45 +140,31 @@ nb.epid <-
   length(unique(incidences2018$season)) ## number of epidemics between 1985 and 2019
 ```
 
-### Lengths of Serfling epidemic periods
+There are `r nb.epid` epidemics between 1985 and 2018. 
 
-```{r serfling lenghts}
-debut_serfling <- c()
-fin_serfling <- c()
+### Detection of epidemics with the method proposed in the paper
 
-for (i in 1:nb.epid) {
-  temp <-
-    incidences2018[(incidences2018$epid_serfling == 1) &
-                     (incidences2018$season == 1984 + i),]$weeknum
-  debut_serfling <- c(debut_serfling, min(temp))
-  fin_serfling <- c(fin_serfling, max(temp))
-}
-longest <- max(fin_serfling - debut_serfling) + 1
-shortest <- min(fin_serfling - debut_serfling) + 1
-```
-
-
-### Dectection of epidemic with proposed method in the paper
-
-#### Define epidemic threshold (=275)
+#### Define epidemic threshold 
 
 ```{r detect epidemics}
-level_epid <- 0.35
+level_epid <- 0.88
 thres_epid <-
-  quantile(incidences[incidences$epid_serfling == 1,]$t_inc, probs = level_epid, na.rm = T)
+  quantile(incidences2018$t_inc, probs = level_epid, na.rm = T)
 ```
+
+The threshold for epidemic definition is chosen as the `r level_epid` and is equal to `r thres_epid`. 
 
 #### Create a new data frame containing the epidemic periods
 
 ```{r dataframe with new epidemics}
 d <- longest
-epid_data_thres <-
+epid_data_thres<-
   EpidemicDataFrame(data = incidences2018, d = d, thres = thres_epid)
 ```
 
-#### Lengths of the epidemic periods
+#### Durations of the epidemic periods
 
-```{r lengths of epidemic}
+```{r durations of epidemic}
 l.epid <- c()
 
 for (i in unique(epid_data_thres$season)) {
@@ -197,47 +173,68 @@ for (i in unique(epid_data_thres$season)) {
                                        (!is.na(epid_data_thres$t_inc)),]$t_inc))
 }
 
+nb.epid <- length(l.epid)
+
 longest_thres <- max(l.epid)
 shortest_thres <- min(l.epid)
+
+year_longest_thres <- unique(incidences$season)[which.max(l.epid)]
+year_shortest_thres <- unique(incidences$season)[which.min(l.epid)]
 ```
 
+In our definition of an epidemic, there are `r nb.epid` epidemics, and the shortest epidemic between 1985 and 2019 was `r shortest_thres` weeks in `r year_shortest_thres` and the longest `r longest_thres` in `r year_longest_thres`.
 
-#### Correcting the dataframe containing new epidemics
-```{r correction dataframe of new epidemics}
+#### Peaks of  epidemic periods
+
+```{r epidemic peaks}
 d <- longest_thres
 epid_data_thres <-
   EpidemicDataFrame(data = incidences2018, d = d, thres = thres_epid)
+
+peaks_thres <- c()
+for (i in unique(epid_data_thres$season)) {
+  peaks_thres <- c(peaks_thres, max(epid_data_thres[epid_data_thres$season == i, ]$t_inc, na.rm = T))
+}
+
+highest_peaks_thres <- max(peaks_thres)
+lowest_peaks_thres <- min(peaks_thres)
+
+year_highest_thres <- unique(incidences$season)[which.max(peaks_thres)]
+year_lowest_thres <- unique(incidences$season)[which.min(peaks_thres)]
 ```
+
+In the new defintion of an epidemic, the value of the highest epidemic peak between 1985 and 2019 was `r highest_peaks_thres` in `r year_highest_thres` and the value of the lowest `r lowest_peaks_thres` in `r lowest_peaks_thres` .
 
 ### Figure 2
 #### Figure 2.a)
-```{r Figure 2a)}
+```{r SynchronEpidemics}
 d1 <- 1
 d2 <- longest
-serf_epid_data <-
-  EpidemicDataFrameSerfling(data = incidences2018, d1 = d1, d2 = d2)
-df.x <- serf_epid_data
+sent_epid_data <-
+  EpidemicDataFrameSentinelles(data = incidences2018, d1 = d1, d2 = d2)
+df.x <- sent_epid_data
 x.plot <- ggplot(data = df.x, aes(x = 1:d2, y = t_inc))
 for (i in 1:nb.epid) {
   x.plot <-
     x.plot + geom_line(data = df.x[df.x$season == 1984 + i,], aes(x = weeks, y = t_inc), size =
                          0.3)
 }
-x.plot <- x.plot + scale_x_continuous(breaks = seq(1, d2, 1))
+x.plot <- x.plot + scale_x_continuous(breaks = seq(1, 16, 1))
 x.plot <-
-  x.plot + xlab("Epidemic weeks") + ylab("Weekly incidence rate per 100,000")
+  x.plot + xlab("Epidemic weeks") + ylab("Incidence rates")
 x.plot <- x.plot + theme(
   panel.grid.minor = element_blank(),
-  text = element_text(size = 13),
-  axis.text.x = element_text(size = 9),
-  axis.text.y = element_text(size = 9)
+  text = element_text(size = 16),
+  axis.text.x = element_text(size = 14),
+  axis.text.y = element_text(size = 14),
+  plot.title = element_text(size = 18)
 )
 x.plot
 ```
 
 #### Figure 2.b)
 
-```{r Figure 2.b)}
+```{r SynchronEpidemicsThres}
 df.x <- subset(epid_data_thres, weeks < d + 1)
 x.plot <- ggplot(data = df.x, aes(x = 1:d, y = t_inc))
 for (i in 1:nb.epid) {
@@ -245,20 +242,20 @@ for (i in 1:nb.epid) {
     x.plot + geom_line(data = df.x[df.x$season == 1984 + i,], aes(x = weeks, y = t_inc), size =
                          0.3)
 }
-x.plot <- x.plot + scale_x_continuous(breaks = seq(1, d, 1))
+x.plot <- x.plot + scale_x_continuous(breaks = seq(1, 16, 1), labels = seq(1, 16, 1)) + expand_limits(x=c(0,16))
 x.plot <-
-  x.plot + xlab("Epidemic weeks") + ylab("Weekly incidence rate per 100,000")
+  x.plot + xlab("Epidemic weeks") + ylab("Incidence rates")
 x.plot <- x.plot + theme(
   panel.grid.minor = element_blank(),
-  text = element_text(size = 12),
-  axis.text.x = element_text(size = 9),
-  axis.text.y = element_text(size = 9)
+  text = element_text(size = 16),
+  axis.text.x = element_text(size = 14),
+  axis.text.y = element_text(size = 14),
+  plot.title = element_text(size = 18)
 )
 x.plot
 ```
 
 ### Construction of the data frame with the threshold excesses of the first 3 weeks
-#### Dataframe containing the first 3 weeks of the epidemics
 
 ```{r dataframe first 3 weeks}
 d <- 3
@@ -266,18 +263,297 @@ epid_data <-
   EpidemicDataFrame(data = incidences2018, d = d, thres = thres_epid)
 ```
 
+### Correlation plots for ILI rates
+```{r ACFWeek1}
+acf.temp <- acf(x = epid_data[epid_data$weeks == 1,]$t_inc,lag.max = 10, plot = F)
+acf.week1 <- data.frame(lag = acf.temp$lag, acf = acf.temp$acf)
+ciline <- qnorm((1 - 0.95)/2)/sqrt(length(epid_data[epid_data$weeks == 1,]$t_inc))
+
+x.plot <- ggplot(data = acf.week1, aes(x = lag , y = acf)) + geom_bar(stat = 'identity', width = 0.03)
+x.plot <- x.plot + geom_hline(yintercept = ciline, color = "blue",linetype =2)
+x.plot <- x.plot + geom_hline(yintercept = -ciline, color = "blue",linetype =2)
+x.plot <- x.plot + geom_hline(yintercept = 0, size = 0.2)
+x.plot <-
+  x.plot + xlab("Lag") + ylab("Autocorrelation")
+x.plot <- x.plot + theme(
+  panel.grid.minor = element_blank(),
+  text = element_text(size = 16),
+  axis.text.x = element_text(size = 14),
+  axis.text.y = element_text(size = 14),
+  plot.title = element_text(size = 18)
+)
+x.plot <- x.plot + scale_x_continuous(breaks = seq(0, 10, 2)) +scale_y_continuous(breaks = seq(-1, 1, .2))
+x.plot
+```
+
+```{r ADCFWeek1}
+adcf.temp <- adcf(x = epid_data[epid_data$weeks == 1,]$t_inc,lag.range=1:10,nreps=200)
+adcf.week1 <- data.frame(lag = adcf.temp$lag, adcf = adcf.temp$adcf)
+ciline_u <- adcf.temp$u[1]
+ciline_l <- adcf.temp$l[1]
+
+x.plot <- ggplot(data = adcf.week1, aes(x = lag , y = adcf)) + geom_bar(stat = 'identity', width = 0.03)
+x.plot <- x.plot + geom_hline(yintercept = ciline_u, color = "blue",linetype =2)
+x.plot <- x.plot + geom_hline(yintercept = ciline_l, color = "blue",linetype =2)
+x.plot <- x.plot + geom_hline(yintercept = 0, size = 0.2)
+x.plot <-
+  x.plot + xlab("Lag") + ylab("Auto Distance Correlation")
+x.plot <- x.plot + theme(
+  panel.grid.minor = element_blank(),
+  text = element_text(size = 16),
+  axis.text.x = element_text(size = 14),
+  axis.text.y = element_text(size = 14),
+  plot.title = element_text(size = 18)
+)
+x.plot <- x.plot + scale_x_continuous(breaks = seq(0, 10, 2)) +scale_y_continuous(breaks = seq(-1, 1, .2))
+x.plot
+```
+
+```{r ACFWeek2}
+acf.temp <- acf(x = epid_data[epid_data$weeks == 2,]$t_inc,lag.max = 10, plot = F)
+acf.week2 <- data.frame(lag = acf.temp$lag, acf = acf.temp$acf)
+ciline <- qnorm((1 - 0.95)/2)/sqrt(length(epid_data[epid_data$weeks == 2,]$t_inc))
+
+x.plot <- ggplot(data = acf.week2, aes(x = lag , y = acf)) + geom_bar(stat = 'identity', width = 0.03)
+x.plot <- x.plot + geom_hline(yintercept = ciline, color = "blue",linetype =2)
+x.plot <- x.plot + geom_hline(yintercept = -ciline, color = "blue",linetype =2)
+x.plot <- x.plot + geom_hline(yintercept = 0, size = 0.2)
+x.plot <-
+  x.plot + xlab("Lag") + ylab("Autocorrelation")
+x.plot <- x.plot + theme(
+  panel.grid.minor = element_blank(),
+  text = element_text(size = 16),
+  axis.text.x = element_text(size = 14),
+  axis.text.y = element_text(size = 14),
+  plot.title = element_text(size = 18)
+)
+x.plot <- x.plot + scale_x_continuous(breaks = seq(0, 10, 2)) +scale_y_continuous(breaks = seq(-1, 1, .2))
+x.plot
+```
+
+```{r ADCFWeek2}
+adcf.temp <- adcf(x = epid_data[epid_data$weeks == 2,]$t_inc,lag.range=1:10,nreps=200)
+adcf.week2 <- data.frame(lag = adcf.temp$lag, adcf = adcf.temp$adcf)
+ciline_u <- adcf.temp$u[1]
+ciline_l <- adcf.temp$l[1]
+
+x.plot <- ggplot(data = adcf.week2, aes(x = lag , y = adcf)) + geom_bar(stat = 'identity', width = 0.03)
+x.plot <- x.plot + geom_hline(yintercept = ciline_u, color = "blue",linetype =2)
+x.plot <- x.plot + geom_hline(yintercept = ciline_l, color = "blue",linetype =2)
+x.plot <- x.plot + geom_hline(yintercept = 0, size = 0.2)
+x.plot <-
+  x.plot + xlab("Lag") + ylab("Auto Distance Correlation")
+x.plot <- x.plot + theme(
+  panel.grid.minor = element_blank(),
+  text = element_text(size = 16),
+  axis.text.x = element_text(size = 14),
+  axis.text.y = element_text(size = 14),
+  plot.title = element_text(size = 18)
+)
+x.plot <- x.plot + scale_x_continuous(breaks = seq(0, 10, 2)) +scale_y_continuous(breaks = seq(-1, 1, .2))
+x.plot
+```
+
+```{r ACFWeek3}
+acf.temp <- acf(x = epid_data[epid_data$weeks == 3,]$t_inc,lag.max = 10, plot = F)
+acf.week3 <- data.frame(lag = acf.temp$lag, acf = acf.temp$acf)
+ciline <- qnorm((1 - 0.95)/2)/sqrt(length(epid_data[epid_data$weeks == 3,]$t_inc))
+
+x.plot <- ggplot(data = acf.week3, aes(x = lag , y = acf)) + geom_bar(stat = 'identity', width = 0.03)
+x.plot <- x.plot + geom_hline(yintercept = ciline, color = "blue",linetype =2)
+x.plot <- x.plot + geom_hline(yintercept = -ciline, color = "blue",linetype =2)
+x.plot <- x.plot + geom_hline(yintercept = 0, size = 0.2)
+x.plot <-
+  x.plot + xlab("Lag") + ylab("Autocorrelation")
+x.plot <- x.plot + theme(
+  panel.grid.minor = element_blank(),
+  text = element_text(size = 16),
+  axis.text.x = element_text(size = 14),
+  axis.text.y = element_text(size = 14),
+  plot.title = element_text(size = 18)
+)
+x.plot <- x.plot + scale_x_continuous(breaks = seq(0, 10, 2)) +scale_y_continuous(breaks = seq(-1, 1, .2))
+x.plot
+```
+
+```{r ADCFWeek3}
+adcf.temp <- adcf(x = epid_data[epid_data$weeks == 3,]$t_inc,lag.range=1:10,nreps=200)
+adcf.week3 <- data.frame(lag = adcf.temp$lag, adcf = adcf.temp$adcf)
+ciline_u <- adcf.temp$u[1]
+ciline_l <- adcf.temp$l[1]
+
+x.plot <- ggplot(data = adcf.week3, aes(x = lag , y = adcf)) + geom_bar(stat = 'identity', width = 0.03)
+x.plot <- x.plot + geom_hline(yintercept = ciline_u, color = "blue",linetype =2)
+x.plot <- x.plot + geom_hline(yintercept = ciline_l, color = "blue",linetype =2)
+x.plot <- x.plot + geom_hline(yintercept = 0, size = 0.2)
+x.plot <-
+  x.plot + xlab("Lag") + ylab("Auto Distance Correlation")
+x.plot <- x.plot + theme(
+  panel.grid.minor = element_blank(),
+  text = element_text(size = 16),
+  axis.text.x = element_text(size = 14),
+  axis.text.y = element_text(size = 14),
+  plot.title = element_text(size = 18)
+)
+x.plot <- x.plot + scale_x_continuous(breaks = seq(0, 10, 2)) +scale_y_continuous(breaks = seq(-1, 1, .2))
+x.plot
+```
+
+
+```{r CCFWeek1Week2}
+ccf.temp <- acf(x = epid_data[epid_data$weeks == 1,]$t_inc,y = epid_data[epid_data$weeks == 2,]$t_inc,lag.max = 10, plot = F)
+cdcf.temp <- c(x = epid_data[epid_data$weeks == 1,]$t_inc,y = epid_data[epid_data$weeks == 2,]$t_inc,lag.range=1:10,nreps=200)
+ccf.week1.2 <- data.frame(lag = ccf.temp$lag, acf = ccf.temp$acf)
+ciline <- qnorm((1 - 0.95)/2)/sqrt(length(epid_data[epid_data$weeks == 3,]$t_inc))
+
+x.plot <- ggplot(data = ccf.week1.2, aes(x = lag , y = acf)) + geom_bar(stat = 'identity', width = 0.03)
+x.plot <- x.plot + geom_hline(yintercept = ciline, color = "blue",linetype =2)
+x.plot <- x.plot + geom_hline(yintercept = -ciline, color = "blue",linetype =2)
+x.plot <- x.plot + geom_hline(yintercept = 0, size = 0.2)
+x.plot <-
+  x.plot + xlab("Lag") + ylab("Crosscorrelation")
+x.plot <- x.plot + theme(
+  panel.grid.minor = element_blank(),
+  text = element_text(size = 16),
+  axis.text.x = element_text(size = 14),
+  axis.text.y = element_text(size = 14),
+  plot.title = element_text(size = 18)
+)
+x.plot <- x.plot + scale_x_continuous(breaks = seq(0, 10, 2)) +scale_y_continuous(breaks = seq(-1, 1, .2))
+x.plot
+```
+
+```{r CDCFWeek1Week2}
+cdcf.temp <- cdcf(x = epid_data[epid_data$weeks == 1,]$t_inc,y = epid_data[epid_data$weeks == 2,]$t_inc,lag.range=1:10,nreps=200)
+cdcf.week1.2 <- data.frame(lag = cdcf.temp$lag, acf = cdcf.temp$cdcf)
+ciline_u <- cdcf.temp$u[1]
+ciline_l <- cdcf.temp$l[1]
+
+x.plot <- ggplot(data = cdcf.week1.2, aes(x = lag , y = acf)) + geom_bar(stat = 'identity', width = 0.03)
+x.plot <- x.plot + geom_hline(yintercept = ciline_u, color = "blue",linetype =2)
+x.plot <- x.plot + geom_hline(yintercept = ciline_l, color = "blue",linetype =2)
+x.plot <- x.plot + geom_hline(yintercept = 0, size = 0.2)
+x.plot <-
+  x.plot + xlab("Lag") + ylab("Cross distance correlation")
+x.plot <- x.plot + theme(
+  panel.grid.minor = element_blank(),
+  text = element_text(size = 16),
+  axis.text.x = element_text(size = 14),
+  axis.text.y = element_text(size = 14),
+  plot.title = element_text(size = 18)
+)
+x.plot <- x.plot + scale_x_continuous(breaks = seq(0, 10, 2)) +scale_y_continuous(breaks = seq(-1, 1, .2))
+x.plot
+```
+
+```{r CCFWeek1Week3}
+ccf.temp <- acf(x = epid_data[epid_data$weeks == 1,]$t_inc,y = epid_data[epid_data$weeks == 3,]$t_inc,lag.max = 10, plot = F)
+ccf.week1.3 <- data.frame(lag = ccf.temp$lag, acf = ccf.temp$acf)
+ciline <- qnorm((1 - 0.95)/2)/sqrt(length(epid_data[epid_data$weeks == 3,]$t_inc))
+
+x.plot <- ggplot(data = ccf.week1.3, aes(x = lag , y = acf)) + geom_bar(stat = 'identity', width = 0.03)
+x.plot <- x.plot + geom_hline(yintercept = ciline, color = "blue",linetype =2)
+x.plot <- x.plot + geom_hline(yintercept = -ciline, color = "blue",linetype =2)
+x.plot <- x.plot + geom_hline(yintercept = 0, size = 0.2)
+x.plot <-
+  x.plot + xlab("Lag") + ylab("Crosscorrelation")
+x.plot <- x.plot + theme(
+  panel.grid.minor = element_blank(),
+  text = element_text(size = 16),
+  axis.text.x = element_text(size = 14),
+  axis.text.y = element_text(size = 14),
+  plot.title = element_text(size = 18)
+)
+x.plot <- x.plot + scale_x_continuous(breaks = seq(0, 10, 2)) +scale_y_continuous(breaks = seq(-1, 1, .2))
+x.plot
+```
+
+```{r CDCFWeek1Week3}
+cdcf.temp <- cdcf(x = epid_data[epid_data$weeks == 1,]$t_inc,y = epid_data[epid_data$weeks == 3,]$t_inc,lag.range=1:10,nreps=200)
+cdcf.week1.3 <- data.frame(lag = cdcf.temp$lag, acf = cdcf.temp$cdcf)
+ciline_u <- cdcf.temp$u[1]
+ciline_l <- cdcf.temp$l[1]
+
+x.plot <- ggplot(data = cdcf.week1.3, aes(x = lag , y = acf)) + geom_bar(stat = 'identity', width = 0.03)
+x.plot <- x.plot + geom_hline(yintercept = ciline_u, color = "blue",linetype =2)
+x.plot <- x.plot + geom_hline(yintercept = ciline_l, color = "blue",linetype =2)
+x.plot <- x.plot + geom_hline(yintercept = 0, size = 0.2)
+x.plot <-
+  x.plot + xlab("Lag") + ylab("Cross distance correlation")
+x.plot <- x.plot + theme(
+  panel.grid.minor = element_blank(),
+  text = element_text(size = 16),
+  axis.text.x = element_text(size = 14),
+  axis.text.y = element_text(size = 14),
+  plot.title = element_text(size = 18)
+)
+x.plot <- x.plot + scale_x_continuous(breaks = seq(0, 10, 2)) +scale_y_continuous(breaks = seq(-1, 1, .2))
+x.plot
+```
+
+```{r CCFWeek2Week3}
+ccf.temp <- acf(x = epid_data[epid_data$weeks == 2,]$t_inc,y = epid_data[epid_data$weeks == 3,]$t_inc,lag.max = 10, plot = F)
+ccf.week2.3 <- data.frame(lag = ccf.temp$lag, acf = ccf.temp$acf)
+ciline <- qnorm((1 - 0.95)/2)/sqrt(length(epid_data[epid_data$weeks == 3,]$t_inc))
+
+x.plot <- ggplot(data = ccf.week2.3, aes(x = lag , y = acf)) + geom_bar(stat = 'identity', width = 0.03)
+x.plot <- x.plot + geom_hline(yintercept = ciline, color = "blue",linetype =2)
+x.plot <- x.plot + geom_hline(yintercept = -ciline, color = "blue",linetype =2)
+x.plot <- x.plot + geom_hline(yintercept = 0, size = 0.2)
+x.plot <-
+  x.plot + xlab("Lag") + ylab("Crosscorrelation")
+x.plot <- x.plot + theme(
+  panel.grid.minor = element_blank(),
+  text = element_text(size = 16),
+  axis.text.x = element_text(size = 14),
+  axis.text.y = element_text(size = 14),
+  plot.title = element_text(size = 18)
+)
+x.plot <- x.plot + scale_x_continuous(breaks = seq(0, 10, 2)) +scale_y_continuous(breaks = seq(-1, 1, .2))
+x.plot
+```
+
+```{r CDCFWeek2Week3}
+cdcf.temp <- cdcf(x = epid_data[epid_data$weeks == 2,]$t_inc,y = epid_data[epid_data$weeks == 3,]$t_inc,lag.range=1:10,nreps=200)
+cdcf.week2.3 <- data.frame(lag = cdcf.temp$lag, acf = cdcf.temp$cdcf)
+ciline_u <- cdcf.temp$u[1]
+ciline_l <- cdcf.temp$l[1]
+
+x.plot <- ggplot(data = cdcf.week2.3, aes(x = lag , y = acf)) + geom_bar(stat = 'identity', width = 0.03)
+x.plot <- x.plot + geom_hline(yintercept = ciline_u, color = "blue",linetype =2)
+x.plot <- x.plot + geom_hline(yintercept = ciline_l, color = "blue",linetype =2)
+x.plot <- x.plot + geom_hline(yintercept = 0, size = 0.2)
+x.plot <-
+  x.plot + xlab("Lag") + ylab("Cross distance correlation")
+x.plot <- x.plot + theme(
+  panel.grid.minor = element_blank(),
+  text = element_text(size = 16),
+  axis.text.x = element_text(size = 14),
+  axis.text.y = element_text(size = 14),
+  plot.title = element_text(size = 18)
+)
+x.plot <- x.plot + scale_x_continuous(breaks = seq(0, 10, 2)) +scale_y_continuous(breaks = seq(-1, 1, .2))
+x.plot
+```
+
+## Section 4 
+
+### Section 4.1 : Risks of extreme rates in the next year
+
 #### Define the GPD threshold 
 
 ```{r GPD thres}
-level_gpd <- c(0.3, 0.3, 0.3)
+level_gpd <- c(0.9, 0.9, 0.9)
 thres_gpd <- rep(NA, 3)
 for (i in 1:3) {
   thres_gpd[i] <-
-    quantile(epid_data[epid_data$weeks == i,]$t_inc_cent, probs = level_gpd[i], na.rm = T)
+    quantile(incidences2018$t_inc, probs = level_gpd[i], na.rm = T)
 }
 ```
 
-#### Add to the dataframe the excesses for extreme epidemic
+The GPD threshold for Weeks 1, 2 and 3 is defined as the `r level_gpd`-quantile of the data, that is `r thres_gpd`. 
+
+#### Add to the dataframe the excesses for extreme epidemics
 ```{r Add excesses}
 `%nin%` = Negate(`%in%`)
 
@@ -285,25 +561,294 @@ epid_data$excess <- rep(NA, length(epid_data$season))
 
 for (j in unique(epid_data$season)) {
   temp <- epid_data[epid_data$season == j,]
-  if (sum(temp$t_inc_cent > thres_gpd, na.rm = T) == 0) {
+  if (sum(temp$t_inc > thres_gpd, na.rm = T) == 0) {
     epid_data[epid_data$season == j,]$excess <- rep(NA, d)
   }
   else {
     epid_data[epid_data$season == j,]$excess <-
-      temp$t_inc_cent - thres_gpd
+      temp$t_inc - thres_gpd
   }
 }
 ```
 
-#### Number of extreme epidemics
-```{r nb of extreme epidemics}
-nb.epid_extreme <- sum(!is.na(epid_data$excess))/3
-nb.epid_extreme
+#### Correlation plots for excesses
+```{r ACFExcess1}
+excess1 <- epid_data[(epid_data$weeks == 1),]$excess
+acf.temp <- acf(x = excess1[!is.na(excess1)],lag.max = 10, plot = F)
+acf.excess1 <- data.frame(lag = acf.temp$lag, acf = acf.temp$acf)
+ciline <- qnorm((1 - 0.95)/2)/sqrt(length(excess1[!is.na(excess1)]))
+
+x.plot <- ggplot(data = acf.excess1, aes(x = lag , y = acf)) + geom_bar(stat = 'identity', width = 0.03)
+x.plot <- x.plot + geom_hline(yintercept = ciline, color = "blue",linetype =2)
+x.plot <- x.plot + geom_hline(yintercept = -ciline, color = "blue",linetype =2)
+x.plot <- x.plot + geom_hline(yintercept = 0, size = 0.2)
+x.plot <-
+  x.plot + xlab("Lag") + ylab("Autocorrelation")
+x.plot <- x.plot + theme(
+  panel.grid.minor = element_blank(),
+  text = element_text(size = 16),
+  axis.text.x = element_text(size = 14),
+  axis.text.y = element_text(size = 14),
+  plot.title = element_text(size = 18)
+)
+x.plot <- x.plot + scale_x_continuous(breaks = seq(0, 10, 2)) +scale_y_continuous(breaks = seq(-1, 1, .2))
+x.plot
 ```
 
-## Section 5 
+```{r ADCFExcess1}
+adcf.temp <- adcf(x = excess1[!is.na(excess1)],lag.range=1:10,nreps=200)
+adcf.excess1 <- data.frame(lag = adcf.temp$lag, adcf = adcf.temp$adcf)
+ciline_u <- adcf.temp$u[1]
+ciline_l <- adcf.temp$l[1]
 
-### Section 5.1 : Risks of extreme rates in the next year
+x.plot <- ggplot(data = adcf.excess1, aes(x = lag , y = adcf)) + geom_bar(stat = 'identity', width = 0.03)
+x.plot <- x.plot + geom_hline(yintercept = ciline_u, color = "blue",linetype =2)
+x.plot <- x.plot + geom_hline(yintercept = ciline_l, color = "blue",linetype =2)
+x.plot <- x.plot + geom_hline(yintercept = 0, size = 0.2)
+x.plot <-
+  x.plot + xlab("Lag") + ylab("Auto Distance Correlation")
+x.plot <- x.plot + theme(
+  panel.grid.minor = element_blank(),
+  text = element_text(size = 16),
+  axis.text.x = element_text(size = 14),
+  axis.text.y = element_text(size = 14),
+  plot.title = element_text(size = 18)
+)
+x.plot <- x.plot + scale_x_continuous(breaks = seq(0, 10, 2)) +scale_y_continuous(breaks = seq(-1, 1, .2))
+x.plot
+```
+
+```{r ACFExcess2}
+excess2 <- epid_data[(epid_data$weeks == 2),]$excess
+acf.temp <- acf(x = excess2[!is.na(excess2)],lag.max = 10, plot = F)
+acf.excess2 <- data.frame(lag = acf.temp$lag, acf = acf.temp$acf)
+ciline <- qnorm((1 - 0.95)/2)/sqrt(length(excess2[!is.na(excess2)]))
+
+x.plot <- ggplot(data = acf.excess2, aes(x = lag , y = acf)) + geom_bar(stat = 'identity', width = 0.03)
+x.plot <- x.plot + geom_hline(yintercept = ciline, color = "blue",linetype =2)
+x.plot <- x.plot + geom_hline(yintercept = -ciline, color = "blue",linetype =2)
+x.plot <- x.plot + geom_hline(yintercept = 0, size = 0.2)
+x.plot <-
+  x.plot + xlab("Lag") + ylab("Autocorrelation")
+x.plot <- x.plot + theme(
+  panel.grid.minor = element_blank(),
+  text = element_text(size = 16),
+  axis.text.x = element_text(size = 14),
+  axis.text.y = element_text(size = 14),
+  plot.title = element_text(size = 18)
+)
+x.plot <- x.plot + scale_x_continuous(breaks = seq(0, 10, 2)) +scale_y_continuous(breaks = seq(-1, 1, .2))
+x.plot
+```
+
+```{r ADCFExcess2}
+adcf.temp <- adcf(x = excess2[!is.na(excess2)],lag.range=1:10,nreps=200)
+adcf.excess2 <- data.frame(lag = adcf.temp$lag, adcf = adcf.temp$adcf)
+ciline_u <- adcf.temp$u[1]
+ciline_l <- adcf.temp$l[1]
+
+x.plot <- ggplot(data = adcf.excess2, aes(x = lag , y = adcf)) + geom_bar(stat = 'identity', width = 0.03)
+x.plot <- x.plot + geom_hline(yintercept = ciline_u, color = "blue",linetype =2)
+x.plot <- x.plot + geom_hline(yintercept = ciline_l, color = "blue",linetype =2)
+x.plot <- x.plot + geom_hline(yintercept = 0, size = 0.2)
+x.plot <-
+  x.plot + xlab("Lag") + ylab("Auto Distance Correlation")
+x.plot <- x.plot + theme(
+  panel.grid.minor = element_blank(),
+  text = element_text(size = 16),
+  axis.text.x = element_text(size = 14),
+  axis.text.y = element_text(size = 14),
+  plot.title = element_text(size = 18)
+)
+x.plot <- x.plot + scale_x_continuous(breaks = seq(0, 10, 2)) +scale_y_continuous(breaks = seq(-1, 1, .2))
+x.plot
+```
+
+```{r ACFExcess3}
+excess3 <- epid_data[(epid_data$weeks == 3),]$excess
+acf.temp <- acf(x = excess3[!is.na(excess3)],lag.max = 10, plot = F)
+acf.excess3 <- data.frame(lag = acf.temp$lag, acf = acf.temp$acf)
+ciline <- qnorm((1 - 0.95)/2)/sqrt(length(excess3[!is.na(excess3)]))
+
+x.plot <- ggplot(data = acf.excess3, aes(x = lag , y = acf)) + geom_bar(stat = 'identity', width = 0.03)
+x.plot <- x.plot + geom_hline(yintercept = ciline, color = "blue",linetype =2)
+x.plot <- x.plot + geom_hline(yintercept = -ciline, color = "blue",linetype =2)
+x.plot <- x.plot + geom_hline(yintercept = 0, size = 0.2)
+x.plot <-
+  x.plot + xlab("Lag") + ylab("Autocorrelation")
+x.plot <- x.plot + theme(
+  panel.grid.minor = element_blank(),
+  text = element_text(size = 16),
+  axis.text.x = element_text(size = 14),
+  axis.text.y = element_text(size = 14),
+  plot.title = element_text(size = 18)
+)
+x.plot <- x.plot + scale_x_continuous(breaks = seq(0, 10, 2)) +scale_y_continuous(breaks = seq(-1, 1, .2))
+x.plot
+```
+
+```{r ADCFExcess3}
+adcf.temp <- adcf(x = excess3[!is.na(excess3)],lag.range=1:10,nreps=200)
+adcf.excess3 <- data.frame(lag = adcf.temp$lag, adcf = adcf.temp$adcf)
+ciline_u <- adcf.temp$u[1]
+ciline_l <- adcf.temp$l[1]
+
+x.plot <- ggplot(data = adcf.excess3, aes(x = lag , y = adcf)) + geom_bar(stat = 'identity', width = 0.03)
+x.plot <- x.plot + geom_hline(yintercept = ciline_u, color = "blue",linetype =2)
+x.plot <- x.plot + geom_hline(yintercept = ciline_l, color = "blue",linetype =2)
+x.plot <- x.plot + geom_hline(yintercept = 0, size = 0.2)
+x.plot <-
+  x.plot + xlab("Lag") + ylab("Auto Distance Correlation")
+x.plot <- x.plot + theme(
+  panel.grid.minor = element_blank(),
+  text = element_text(size = 16),
+  axis.text.x = element_text(size = 14),
+  axis.text.y = element_text(size = 14),
+  plot.title = element_text(size = 18)
+)
+x.plot <- x.plot + scale_x_continuous(breaks = seq(0, 10, 2)) +scale_y_continuous(breaks = seq(-1, 1, .2))
+x.plot
+```
+
+
+
+
+
+```{r CCFExcess1Excess2}
+ccf.temp <- acf(x = excess1[!is.na(excess1)],y = excess2[!is.na(excess2)],lag.max = 10, plot = F)
+ccf.excess1.2 <- data.frame(lag = ccf.temp$lag, acf = ccf.temp$acf)
+ciline <- qnorm((1 - 0.95)/2)/sqrt(length(excess1))
+
+x.plot <- ggplot(data = ccf.excess1.2, aes(x = lag , y = acf)) + geom_bar(stat = 'identity', width = 0.03)
+x.plot <- x.plot + geom_hline(yintercept = ciline, color = "blue",linetype =2)
+x.plot <- x.plot + geom_hline(yintercept = -ciline, color = "blue",linetype =2)
+x.plot <- x.plot + geom_hline(yintercept = 0, size = 0.2)
+x.plot <-
+  x.plot + xlab("Lag") + ylab("Crosscorrelation")
+x.plot <- x.plot + theme(
+  panel.grid.minor = element_blank(),
+  text = element_text(size = 16),
+  axis.text.x = element_text(size = 14),
+  axis.text.y = element_text(size = 14),
+  plot.title = element_text(size = 18)
+)
+x.plot <- x.plot + scale_x_continuous(breaks = seq(0, 10, 2)) +scale_y_continuous(breaks = seq(-1, 1, .2))
+x.plot
+```
+
+```{r CDCFExcess1Excess2}
+cdcf.temp <- cdcf(x = excess1[!is.na(excess1)],y = excess2[!is.na(excess2)],lag.range=1:10,nreps=200)
+cdcf.excess1.2 <- data.frame(lag = cdcf.temp$lag, acf = cdcf.temp$cdcf)
+ciline_u <- cdcf.temp$u[1]
+ciline_l <- cdcf.temp$l[1]
+
+x.plot <- ggplot(data = cdcf.excess1.2, aes(x = lag , y = acf)) + geom_bar(stat = 'identity', width = 0.03)
+x.plot <- x.plot + geom_hline(yintercept = ciline_u, color = "blue",linetype =2)
+x.plot <- x.plot + geom_hline(yintercept = ciline_l, color = "blue",linetype =2)
+x.plot <- x.plot + geom_hline(yintercept = 0, size = 0.2)
+x.plot <-
+  x.plot + xlab("Lag") + ylab("Cross distance correlation")
+x.plot <- x.plot + theme(
+  panel.grid.minor = element_blank(),
+  text = element_text(size = 16),
+  axis.text.x = element_text(size = 14),
+  axis.text.y = element_text(size = 14),
+  plot.title = element_text(size = 18)
+)
+x.plot <- x.plot + scale_x_continuous(breaks = seq(0, 10, 2)) +scale_y_continuous(breaks = seq(-1, 1, .2))
+x.plot
+```
+
+```{r CCFExcess1Excess3}
+ccf.temp <- acf(x = excess1[!is.na(excess1)],y = excess3[!is.na(excess3)],lag.max = 10, plot = F)
+ccf.excess1.3 <- data.frame(lag = ccf.temp$lag, acf = ccf.temp$acf)
+ciline <- qnorm((1 - 0.95)/2)/sqrt(length(excess1))
+
+x.plot <- ggplot(data = ccf.excess1.3, aes(x = lag , y = acf)) + geom_bar(stat = 'identity', width = 0.03)
+x.plot <- x.plot + geom_hline(yintercept = ciline, color = "blue",linetype =2)
+x.plot <- x.plot + geom_hline(yintercept = -ciline, color = "blue",linetype =2)
+x.plot <- x.plot + geom_hline(yintercept = 0, size = 0.2)
+x.plot <-
+  x.plot + xlab("Lag") + ylab("Crosscorrelation")
+x.plot <- x.plot + theme(
+  panel.grid.minor = element_blank(),
+  text = element_text(size = 16),
+  axis.text.x = element_text(size = 14),
+  axis.text.y = element_text(size = 14),
+  plot.title = element_text(size = 18)
+)
+x.plot <- x.plot + scale_x_continuous(breaks = seq(0, 10, 2)) +scale_y_continuous(breaks = seq(-1, 1, .2))
+x.plot
+```
+
+```{r CDCFExcess1Excess3}
+cdcf.temp <- cdcf(x = excess1[!is.na(excess1)],y = excess3[!is.na(excess3)],lag.range=1:10,nreps=200)
+cdcf.excess1.3 <- data.frame(lag = cdcf.temp$lag, acf = cdcf.temp$cdcf)
+ciline_u <- cdcf.temp$u[1]
+ciline_l <- cdcf.temp$l[1]
+
+x.plot <- ggplot(data = cdcf.excess1.3, aes(x = lag , y = acf)) + geom_bar(stat = 'identity', width = 0.03)
+x.plot <- x.plot + geom_hline(yintercept = ciline_u, color = "blue",linetype =2)
+x.plot <- x.plot + geom_hline(yintercept = ciline_l, color = "blue",linetype =2)
+x.plot <- x.plot + geom_hline(yintercept = 0, size = 0.2)
+x.plot <-
+  x.plot + xlab("Lag") + ylab("Cross distance correlation")
+x.plot <- x.plot + theme(
+  panel.grid.minor = element_blank(),
+  text = element_text(size = 16),
+  axis.text.x = element_text(size = 14),
+  axis.text.y = element_text(size = 14),
+  plot.title = element_text(size = 18)
+)
+x.plot <- x.plot + scale_x_continuous(breaks = seq(0, 10, 2)) +scale_y_continuous(breaks = seq(-1, 1, .2))
+x.plot
+```
+
+```{r CCFExcess2Excess3}
+ccf.temp <- acf(x = excess2[!is.na(excess2)],y = excess3[!is.na(excess3)],lag.max = 10, plot = F)
+ccf.excess2.3 <- data.frame(lag = ccf.temp$lag, acf = ccf.temp$acf)
+ciline <- qnorm((1 - 0.95)/2)/sqrt(length(excess1))
+
+x.plot <- ggplot(data = ccf.excess2.3, aes(x = lag , y = acf)) + geom_bar(stat = 'identity', width = 0.03)
+x.plot <- x.plot + geom_hline(yintercept = ciline, color = "blue",linetype =2)
+x.plot <- x.plot + geom_hline(yintercept = -ciline, color = "blue",linetype =2)
+x.plot <- x.plot + geom_hline(yintercept = 0, size = 0.2)
+x.plot <-
+  x.plot + xlab("Lag") + ylab("Crosscorrelation")
+x.plot <- x.plot + theme(
+  panel.grid.minor = element_blank(),
+  text = element_text(size = 16),
+  axis.text.x = element_text(size = 14),
+  axis.text.y = element_text(size = 14),
+  plot.title = element_text(size = 18)
+)
+x.plot <- x.plot + scale_x_continuous(breaks = seq(0, 10, 2)) +scale_y_continuous(breaks = seq(-1, 1, .2))
+x.plot
+```
+
+```{r CDCFExcess2Excess3}
+cdcf.temp <- cdcf(x = excess2[!is.na(excess2)],y = excess3[!is.na(excess3)],lag.range=1:10,nreps=200)
+cdcf.excess2.3 <- data.frame(lag = cdcf.temp$lag, acf = cdcf.temp$cdcf)
+ciline_u <- cdcf.temp$u[1]
+ciline_l <- cdcf.temp$l[1]
+
+x.plot <- ggplot(data = cdcf.excess2.3, aes(x = lag , y = acf)) + geom_bar(stat = 'identity', width = 0.03)
+x.plot <- x.plot + geom_hline(yintercept = ciline_u, color = "blue",linetype =2)
+x.plot <- x.plot + geom_hline(yintercept = ciline_l, color = "blue",linetype =2)
+x.plot <- x.plot + geom_hline(yintercept = 0, size = 0.2)
+x.plot <-
+  x.plot + xlab("Lag") + ylab("Cross distance correlation")
+x.plot <- x.plot + theme(
+  panel.grid.minor = element_blank(),
+  text = element_text(size = 16),
+  axis.text.x = element_text(size = 14),
+  axis.text.y = element_text(size = 14),
+  plot.title = element_text(size = 18)
+)
+x.plot <- x.plot + scale_x_continuous(breaks = seq(0, 10, 2)) +scale_y_continuous(breaks = seq(-1, 1, .2))
+x.plot
+```
+
 
 #### Fit an exponential distribution 
 
@@ -314,7 +859,7 @@ df.param0 <- c(NA, NA, NA)
 for (i in 1:(d)) {
   week <-
     epid_data[(epid_data$weeks == i) &
-                !is.na(epid_data$t_inc_cent),]$t_inc_cent
+                !is.na(epid_data$t_inc),]$t_inc
   univ.fit_exp[[i]] <-
     fevd(
       x = week,
@@ -330,40 +875,44 @@ for (i in 1:(d)) {
 df.param0 <- df.param0[-1, ]
 ```
 
-#### Table 1
+#### Table 1 Weeks 1,2 and 3
 ```{r table 1}
+rownames(df.param0) <- c("Week1", "Week2", "Week3")
 kable(df.param0)
 ```
 
 #### LR tests for testing $\gamma=0$
 
 ```{r LR tests}
-loglik_gpd <- rep(0, 3)
-for (i in 1:(d)) {
+univ.fit_gpd <- list()
+for (i in 1:d) {
   week <-
     epid_data[(epid_data$weeks == i) &
-                !is.na(epid_data$t_inc_cent),]$t_inc_cent
-  fit <- fevd(x = week,
-                 threshold = thres_gpd[i],
-                  type = "GP", method ='MLE')
-  loglik_gpd[i] <- fit$results$value
+                    !is.na(epid_data$t_inc), ]$t_inc
+  univ.fit_gpd[[i]]<-   fevd(
+      x = week,
+      threshold = thres_gpd[i],
+      type = "GP",
+      method = "MLE"
+    )
 }
 
 pvalue <- rep(0, 3)
 for (i in 1:d) {
-  lr <- -2 * (loglik_gpd[i] - univ.fit_exp[[i]]$results$value)
-  pvalue[i] <- 1 - pchisq(q = lr, df = 1)
+  lr <- lr.test(univ.fit_gpd[[i]],univ.fit_exp[[i]])
+  pvalue[i] <- lr$p.value
 }
 ```
 
+The p-values of the LR tests for $\gamma = 0$ for Weeks 1, 2 and 3 are equal to `r pvalue` respectively. 
 
-#### Figure 3 : Exponential qqplots
-##### Figure 3a)
 
-```{r Figure 3a)}
+#### Exponential qqplots (Supplementary material)
+
+```{r ExpoQQplotWeek1}
 week1 <-
   epid_data[(epid_data$weeks == 1) &
-              !is.na(epid_data$t_inc_cent),]$t_inc_cent
+              !is.na(epid_data$t_inc),]$t_inc
 obs1 <- week1[week1 > thres_gpd[1]] - thres_gpd[1]
 theo1  <-
   qevd(
@@ -375,7 +924,7 @@ theo1  <-
 
 df_qq1 <- data.frame(Obs = sort(obs1), Theo = theo1)
 qq.plot1 <-
-  ggplot(data = df_qq1, aes(x = Obs, y = Theo)) + geom_point(shape = 1, size = 3)
+  ggplot(data = df_qq1, aes(x = Obs, y = Theo)) + geom_point(shape = 1, size = 2.5)
 qq.plot1 <-
   qq.plot1 + geom_abline(
     slope = 1,
@@ -386,21 +935,21 @@ qq.plot1 <-
   )
 qq.plot1 <- qq.plot1 + theme(
   panel.grid.minor = element_blank(),
-  text = element_text(size = 14),
-  axis.text.x = element_text(size = 12),
-  axis.text.y = element_text(size = 12)
+  text = element_text(size = 16),
+  axis.text.x = element_text(size = 14),
+  axis.text.y = element_text(size = 14),
+  plot.title = element_text(size = 18)
 )
-qq.plot1  <-  qq.plot1 + xlim(0, 325) + ylim(0 , 325) + coord_fixed()
+qq.plot1  <-  qq.plot1 + xlim(0, 300) + ylim(0 , 300) + coord_fixed()
 qq.plot1 <- qq.plot1 + xlab("Observed") + ylab("Theorical")
 qq.plot1
 ```
 
-##### Figure 3b)
 
-```{r Figure 3b)}
+```{r ExpoQQplotWeek2}
 week2 <-
   epid_data[(epid_data$weeks == 2) &
-              !is.na(epid_data$t_inc_cent),]$t_inc_cent
+              !is.na(epid_data$t_inc),]$t_inc
 obs2 <- week2[week2 > thres_gpd[2]] - thres_gpd[2]
 theo2  <-
   qevd(
@@ -412,7 +961,7 @@ theo2  <-
 
 df_qq2 <- data.frame(Obs = sort(obs2), Theo = theo2)
 qq.plot2 <-
-  ggplot(data = df_qq2, aes(x = Obs, y = Theo)) + geom_point(shape = 1, size = 3)
+  ggplot(data = df_qq2, aes(x = Obs, y = Theo)) + geom_point(shape = 1, size = 2.5)
 qq.plot2 <-
   qq.plot2 + geom_abline(
     slope = 1,
@@ -423,21 +972,21 @@ qq.plot2 <-
   )
 qq.plot2 <- qq.plot2 + theme(
   panel.grid.minor = element_blank(),
-  text = element_text(size = 14),
-  axis.text.x = element_text(size = 12),
-  axis.text.y = element_text(size = 12)
+  text = element_text(size = 16),
+  axis.text.x = element_text(size = 14),
+  axis.text.y = element_text(size = 14),
+  plot.title = element_text(size = 18)
 )
-qq.plot2  <-  qq.plot2 + xlim(0, 915) + ylim(0 , 915) + coord_fixed()
+qq.plot2  <-  qq.plot2 + xlim(0, 1100) + ylim(0 , 1100) + coord_fixed()
 qq.plot2 <- qq.plot2 + xlab("Observed") + ylab("Theorical")
 qq.plot2
 ```
 
-##### Figure 3c)
 
-```{r Figure 3c)}
+```{r ExpoQQplotWeek3}
 week3 <-
   epid_data[(epid_data$weeks == 3) &
-              !is.na(epid_data$t_inc_cent),]$t_inc_cent
+              !is.na(epid_data$t_inc),]$t_inc
 obs3 <- week3[week3 > thres_gpd[3]] - thres_gpd[3]
 theo3  <-
   qevd(
@@ -449,7 +998,7 @@ theo3  <-
 
 df_qq3 <- data.frame(Obs = sort(obs3), Theo = theo3)
 qq.plot3 <-
-  ggplot(data = df_qq3, aes(x = Obs, y = Theo)) + geom_point(shape = 1, size = 3)
+  ggplot(data = df_qq3, aes(x = Obs, y = Theo)) + geom_point(shape = 1, size = 2.5)
 qq.plot3 <-
   qq.plot3 + geom_abline(
     slope = 1,
@@ -460,52 +1009,56 @@ qq.plot3 <-
   )
 qq.plot3 <- qq.plot3 + theme(
   panel.grid.minor = element_blank(),
-  text = element_text(size = 14),
-  axis.text.x = element_text(size = 12),
-  axis.text.y = element_text(size = 12)
+  text = element_text(size = 16),
+  axis.text.x = element_text(size = 14),
+  axis.text.y = element_text(size = 14),
+  plot.title = element_text(size = 18)
 )
 qq.plot3  <-
-  qq.plot3 + xlim(0, 1500) + ylim(0 , 1500) +  coord_fixed()
+qq.plot3 + xlim(0, 1650) + ylim(0 , 1650) +  coord_fixed()
 qq.plot3 <- qq.plot3 + xlab("Observed") + ylab("Theorical")
 qq.plot3
 ```
 
-### Table 2 a)
-```{r table 2a}
-### Week 3###
+#### Table 2 (Week3)
+```{r table 2}
+nb.excess.Week3 <- length(obs3)
+p.u <- nb.excess.Week3 / nb.epid
+
 #One year - 10% #
 n <- 1
 alpha <- 0.1
-p.u <- 24 / 34
 R1.10 <-
   thres_gpd[3] + sigma_univ[3] * (log(p.u) - log(1 - (1 - alpha) ^ (1 / n)))
 #One year - 1% #
 n <- 1
 alpha <- 0.01
-p.u <- 24 / 34
 R1.1 <-
   thres_gpd[3] + sigma_univ[3] * (log(p.u) - log(1 - (1 - alpha) ^ (1 / n)))
 
 #10 years - 10% #
 n <- 10
 alpha <- 0.1
-p.u <- 24 / 34
 R10.10 <-
   thres_gpd[3] + sigma_univ[3] * (log(p.u) - log(1 - (1 - alpha) ^ (1 / n)))
 
 #10 years - 1% #
 n <- 10
 alpha <- 0.01
-p.u <- 24 / 34
 R10.1 <-
   thres_gpd[3] + sigma_univ[3] * (log(p.u) - log(1 - (1 - alpha) ^ (1 / n)))
 
-kable(data.frame(R1.10, R1.1, R10.10, R10.1))
+risks <- data.frame(R1.10, R1.1, R10.10, R10.1)
+rownames(risks) <- c("risks")
+colnames(risks) <- c("1 year - 10%", "1 year - 1%", "10 years - 10%", "10 years - 1%")
+kable(risks)
 ```
 
-## Section 5.2
+The estimate of $\widehat p_u$ is equal to `r p.u`. 
 
-### Standardize the excesses
+### Section 4.2
+
+#### Standardize the excesses
 
 ```{r standardize the excesses}
 epid_data$excess_stand <- rep(NA, length(epid_data$season))
@@ -515,7 +1068,7 @@ for (i in 1:d) {
 }
 ```
 
-### Consider only extreme epidemics
+#### Consider only extreme epidemics
 
 ```{r extreme epidemics}
 season_NA <-
@@ -529,81 +1082,189 @@ excess_stand_matrix <-
          byrow = T)
 ```
 
-### Model selection
+```{r nb of extreme epidemics}
+nb.epid_extreme <-  sum(!is.na(epid_data$excess))/3
+```
+The number of extreme epidemics is `r nb.epid_extreme`. 
 
-#### Fit a MGPD Gumbel model 
+#### Model selection
 
-```{r fit Gumbel}
-alpha0 <- runif(d, 2.5, 5)
-b0 <- runif(d - 1, -2.5, 2.5) # if beta1 is fixed to 0 beta2 and beta 3 are close to 0
-beta1 <- 0
+For each model, we do the optimisation 50 times and then choose the parameters of the iteration which has the smaller -log(LLK). Since it takes a lot of time, we save the results in the file. 
 
-fitGumbelU_standard <-
-  optim(
-    par = c(alpha0, b0),
-    fn = LLKGumbelMGPDstand_U,
-    x = excess_stand_matrix,
-    beta1 = beta1,
-    lw = c(1.1,-5),
-    up = c(15, 5),
-    control = list(maxit = 1e4, reltol = 1e-10)
-  )
 
+##### Fit a MGPD Gumbel model 
+
+```{r iterations fit Gumbel}
+#  nb.run <- 50
+# fit.Gumbel_fun <- function(i) {
+#    library('pracma')
+# alpha0 <- runif(d, 1.2, 50)
+# b0 <- runif(d - 1, -1, 1) # if beta1 is fixed to 0 beta2 and beta 3 are close to 0
+# beta1 <- 0
+# 
+# fitGumbelU_standard <- optim(
+#     par = c(alpha0, b0),
+#     fn = LLKGumbelMGPDstand_U,
+#     x = excess_stand_matrix,
+#     beta1 = beta1,
+#     lw = c(1.1,-2),
+#     up = c(100, 2),
+#     control = list(maxit = 1e7, reltol = 1e-15)
+#   )
+# 
+#    return(
+#      c(
+#        fitGumbelU_standard$par[1:d],
+#        fitGumbelU_standard$par[-(1:d)],
+#        fitGumbelU_standard$value
+#      )
+# )
+# }
+# 
+# 
+#  x_gumbel <- foreach(i = 1:nb.run) %dopar%  fit.Gumbel_fun(i)
+#  res.Gumbel  <-
+#    matrix(unlist(x_gumbel),
+#           nrow = nb.run,
+#           ncol = 2 * d,
+#           byrow = T)
+# 
+#  res.Gumbel <- as.data.frame(res.Gumbel)
+#  colnames(res.Gumbel) <-
+#    c("alpha1", "alpha2", "alpha3", "beta2", "beta3", "LLK")
+#  bestGumbel <- which.min(res.Gumbel$LLK)
+# 
+# write.csv(res.Gumbel, file = 'res.GumbelFitWeek3.csv')
+```
+
+```{r charge file with iterations of Gumbel fits}
+res.Gumbel <- read.csv(file = "res.GumbelFitWeek3.csv", header = T, sep =",")
+res.Gumbel <- res.Gumbel[,-1]
+bestGumbel <- which.min(res.Gumbel$LLK)
 
 AIC_Gumbel <-
-  2 * length(fitGumbelU_standard$par) + 2 * fitGumbelU_standard$value
+  2 * (dim(res.Gumbel)[2]-1) + 2 * res.Gumbel[bestGumbel, d + 3]
 BIC_Gumbel <-
-  log(dim(excess_stand_matrix)[1]) * length(fitGumbelU_standard$par) + 2 *
-  fitGumbelU_standard$value
+  log(dim(excess_stand_matrix)[1]) * (dim(res.Gumbel)[2]-1) + 2 *
+  res.Gumbel[bestGumbel, d + 3]
 ```
 
-#### Fit a MGPD reverse Gumbel model 
+
+##### Fit a MGPD reverse Gumbel model 
 
 Note that the reserve Gumbel model can be very instable but AIC and BIC are always much larger than the other two models
-```{r fit rev Gumbel}
-alpha0 <- runif(d, 1.2, 2)
-b0 <- rep(0.1, 2)
-beta1 <- 0
 
-fitRevGumbelU_standard <-
-  optim(
-    par = c(alpha0, b0),
-    fn = LLKRevGumbelMGPDstand_U,
-    x = excess_stand_matrix,
-    beta1 = beta1,
-    lw = c(1e-12,-50),
-    up = c(15, 50),
-    control = list(maxit = 1e4, reltol = 1e-10)
-  )
 
-AIC_RevGumbel <- 2*length(fitRevGumbelU_standard$par)+2*fitRevGumbelU_standard$value
-BIC_RevGumbel <- log(dim(excess_stand_matrix)[1])*length(fitRevGumbelU_standard$par)+2*fitRevGumbelU_standard$value
+```{r iterations fit rev Gumbel}
+# nb.run <- 50
+# fit.RevGumbel_fun <- function(i) {
+#   library('pracma')
+# alpha0 <- runif(d, 1.2, 2)
+# b0 <- rep(0.1, 2)
+# beta1 <- 0
+# 
+# fitRevGumbelU_standard <-
+#   optim(
+#     par = c(alpha0, b0),
+#     fn = LLKRevGumbelMGPDstand_U,
+#     x = excess_stand_matrix,
+#     beta1 = beta1,
+#     lw = c(1e-12,-1),
+#     up = c(100, 1),
+#     control = list(maxit = 1e7, reltol = 1e-15)
+#   )
+# 
+#   return(
+#     c(
+#       fitRevGumbelU_standard$par[1:d],
+#       fitRevGumbelU_standard$par[-(1:d)],
+#       fitRevGumbelU_standard$value
+#     )
+#   )
+# }
+# x_revgumbel <- foreach(i = 1:nb.run) %dopar%  fit.RevGumbel_fun(i)
+# res.RevGumbel  <-
+#   matrix(
+#     unlist(x_revgumbel),
+#     nrow = nb.run,
+#     ncol = 2 * d,
+#     byrow = T
+#   )
+# 
+#  res.RevGumbel <- as.data.frame(res.RevGumbel)
+#  colnames(res.RevGumbel) <-
+#    c("alpha1", "alpha2", "alpha3", "beta2", "beta3", "LLK")
+# 
+# write.csv(res.RevGumbel, file = 'res.RevGumbelFitWeek3.csv')
+```
+
+```{r}
+res.RevGumbel <- read.csv(file = "res.RevGumbelFitWeek3.csv", header = T, sep =",")
+res.RevGumbel <- res.RevGumbel[,-1]
+bestRevGumbel <- which.min(res.RevGumbel$LLK)
+AIC_RevGumbel <-
+  2 *(dim(res.RevGumbel)[2]-1) + 2 * res.RevGumbel[bestRevGumbel, d +
+                                                     3]
+BIC_RevGumbel <-
+  log(dim(excess_stand_matrix)[1]) *(dim(res.RevGumbel)[2]-1)  + 2 *
+  res.RevGumbel[bestRevGumbel, d + 3]
+```
+
+##### Fit a MGPD reverse Exponential model 
+
+```{r iterations fit rev Expo}
+#  nb.run <- 50
+#  fit.RevExpo_fun <- function(i) {
+#    library('pracma')
+#   alpha0 <- runif(d, 0.2, 5)
+# b0 <- runif(d - 1, -2.5, 2.5)
+# beta1 <- 0
+# 
+# fitRevExpoU_standard <- optim(
+#   par = c(alpha0, b0),
+#   fn = LLKRevExpoMGPDstand_U,
+#   x = excess_stand_matrix,
+#   beta1 = beta1,
+#   lw = c(0.1,-3),
+#   up = c(100, 3),
+#   control = list(maxit = 1e7, reltol = 1e-15)
+# )
+#    return(
+#      c(
+#       fitRevExpoU_standard$par[1:d],
+#        fitRevExpoU_standard$par[-(1:d)],
+#       fitRevExpoU_standard$value
+#      )
+#    )
+#  }
+# 
+# x_revexpo <- foreach(i = 1:nb.run) %dopar%  fit.RevExpo_fun(i)
+#  res.RevExpo <-
+#    matrix(unlist(x_revexpo),
+#           nrow = nb.run,
+#           ncol = 2 * d,
+#           byrow = T)
+# 
+#  res.RevExpo <- as.data.frame(res.RevExpo)
+#  colnames(res.RevExpo) <-
+#    c("alpha1", "alpha2", "alpha3", "beta2", "beta3", "LLK")
+# 
+# write.csv(res.RevExpo, file = 'res.RevExpoFitWeek3.csv')
+```
+
+```{r}
+res.RevExpo <- read.csv(file = "res.RevExpoFitWeek3.csv", header = T, sep =",")
+res.RevExpo <- res.RevExpo[,-1]
+ bestRevExpo <- which.min(res.RevExpo$LLK)
+ AIC_RevExpo <-
+   2 * (dim(res.RevExpo)[2]-1)  + 2 * res.RevExpo[bestRevExpo, d + 3]
+ BIC_RevExpo <-
+   log(dim(excess_stand_matrix)[1]) * (dim(res.RevExpo)[2]-1)  + 2 *
+   res.RevExpo[bestRevExpo, d + 3]
 ```
 
 
-#### Fit a MGPD reverse Exponential model 
-
-```{r fit rev Expo}
-alpha0 <- runif(d, 0.2, 5)
-b0 <- runif(d - 1, -2.5, 2.5)
-beta1 <- 0
-
-fitRevExpoU_standard <- optim(
-  par = c(alpha0, b0),
-  fn = LLKRevExpoMGPDstand_U,
-  x = excess_stand_matrix,
-  beta1 = beta1,
-  lw = c(0.1,-3),
-  up = c(10, 3),
-  control = list(maxit = 1e4, reltol = 1e-10)
-)
-
-AIC_RevExpo <- 2*length(fitRevExpoU_standard$par)+2*fitRevExpoU_standard$value
-BIC_RevExpo <- log(dim(excess_stand_matrix)[1])*length(fitRevExpoU_standard$par)+2*fitRevExpoU_standard$value
-```
-
-
-### Table 3 a)
+#### Table 3 a)
 ```{r table 3a}
 tab3 <- data.frame(matrix(c(AIC_Gumbel,BIC_Gumbel, AIC_RevGumbel, BIC_RevGumbel,AIC_RevExpo,   BIC_RevExpo), ncol = 3))
 colnames(tab3) <- c('Gumbel', 'RevGumbel', 'RevExpo')
@@ -613,12 +1274,19 @@ kable(tab3)
 
 Selected model = Gumbel model 
 
-## Model simplification 
+```{r Gumbel saving parameters and llk}
+est.alpha_M1 <- as.numeric(res.Gumbel[bestGumbel, 1:d])
+est.beta_M1 <- c(0, as.numeric(res.Gumbel[bestGumbel, (d + 1):(d + 2)]))
 
-### $\beta$ fixed equal to 0
+LLKGumbel <- as.numeric(res.Gumbel[bestGumbel, d+3])
+``` 
+
+### Model simplification 
+
+#### $\beta$ fixed equal to 0
 
 ```{r fit a model M2 : all beta are fixed}
-alpha0 <- fitGumbelU_standard$par[1:d]
+alpha0 <- est.alpha_M1
 beta <- rep(0, d)
 
 fitGumbelU_standard_alpha <-
@@ -639,18 +1307,18 @@ BIC_M2 <-
   2 * fitGumbelU_standard_alpha$value
 
 T <-
-  -2 * (fitGumbelU_standard$value - fitGumbelU_standard_alpha$value)
+  -2 * (LLKGumbel - fitGumbelU_standard_alpha$value)
 LR_M2 <-
   pchisq(q = T,
          df = (5 - length(fitGumbelU_standard_alpha$par)),
          lower.tail = F)
 ```
 
-### all $\alpha$ are equal
+#### all $\alpha$ are equal
 
 ```{r fit a model M2 : all alpha are equal}
-a0 <- mean(fitGumbelU_standard$par[1:3])
-b0 <- fitGumbelU_standard$par[-(1:3)]
+a0 <- mean(est.alpha_M1)
+b0 <- est.beta_M1[2:3]
 beta1 <- 0
 
 fitGumbelU_standard_abeta <-
@@ -672,7 +1340,7 @@ BIC_M3 <-
   2 * fitGumbelU_standard_abeta$value
 
 T <-
-  -2 * (fitGumbelU_standard$value - fitGumbelU_standard_abeta$value)
+  -2 * (LLKGumbel - fitGumbelU_standard_abeta$value)
 LR_M3 <-
   pchisq(
     q = T,
@@ -682,10 +1350,10 @@ LR_M3 <-
 ```
 
 
-### $\beta$ fixed equal to 0 and all $\alpha$ equal
+#### $\beta$ fixed equal to 0 and all $\alpha$ equal
 
 ```{r beta fixed equal to 0 and all alpha equal}
- a0 <- mean(fitGumbelU_standard$par[1:3])
+ a0 <- mean(est.alpha_M1)
  beta <- rep(0, d)
 
  fitGumbelU_standard_a <- optimize(
@@ -701,38 +1369,41 @@ LR_M3 <-
  BIC_M4 <-
    log(dim(excess_stand_matrix)[1]) + 2 * fitGumbelU_standard_a$objective
 
- T <- -2 * (fitGumbelU_standard$value - fitGumbelU_standard_a$objective)
+ T <- -2 * (LLKGumbel - fitGumbelU_standard_a$objective)
  LR_M4 <-
    pchisq(
      q = T,
      df = 5 - length(fitGumbelU_standard_a$par),
      lower.tail = F
    )
+ 
+ LR_M4
 ```
 
-### Table 4 a)
+#### Table for model simplification (supplementary material)
 
-```{r table 4a}
+```{r tab model simp}
 tab4 <- data.frame(matrix(c(AIC_Gumbel,AIC_M2,AIC_M3,AIC_M4,BIC_Gumbel, BIC_M2, BIC_M3,BIC_M4,NA,LR_M2, LR_M3, LR_M4), ncol = 3))
 colnames(tab4) <- c('AIC', 'BIC', 'LR')
 rownames(tab4) <- c('M1', 'M2', 'M3','M4')
-kable(tab4)
+kable(tab4, digits = 20)
 ```
 
 Selected model : M1
 
-### Table 5a) and Saving the parameters
-```{r table 5a}
-est.alpha_M1 <- fitGumbelU_standard$par[1:3]
-est.beta_M1 <- c(0,fitGumbelU_standard$par[-(1:3)])
+#### Table : estimates of the parameters
+```{r tab estimates parameters}
 est.matrix_M1 <- rbind(est.alpha_M1, est.beta_M1)
 write.csv(est.matrix_M1, file = "EstimatesParametersWeek3.csv")
-kable(est.matrix_M1)
+est.M1 <- data.frame(est.matrix_M1)
+rownames(est.M1) <- c("alpha", "beta")
+colnames(est.M1) <- c("1", "2", "3")
+kable(est.M1)
 ```
 
-## Prediction of year 2019
+### Prediction of year 2019
 
-### Estimation of the probability to be an extreme episode when x1 and x2 <0 : pu
+#### Estimation of the probability to be an extreme episode when x1 and x2 <0 
 
 ```{r proba to be extreme}
 den <- 0
@@ -740,16 +1411,16 @@ num <- 0
 for (i in 1985:2018) {
   temp <- epid_data[epid_data$season == i, ]
   den <-
-    den + (temp[temp$weeks == 1,]$t_inc_cent < thres_gpd[1]) * (temp[temp$weeks == 2,]$t_inc_cent < thres_gpd[2])
+    den + (temp[temp$weeks == 1,]$t_inc < thres_gpd[1]) * (temp[temp$weeks == 2,]$t_inc < thres_gpd[2])
   num <-
-    num++(temp[temp$weeks == 1,]$t_inc_cent < thres_gpd[1]) * (temp[temp$weeks == 2,]$t_inc_cent < thres_gpd[2]) * (temp[temp$weeks == 3,]$t_inc_cent > thres_gpd[3])
+    num + (temp[temp$weeks == 1,]$t_inc < thres_gpd[1]) * (temp[temp$weeks == 2,]$t_inc < thres_gpd[2]) * (temp[temp$weeks == 3,]$t_inc > thres_gpd[3])
 }
 
 proba_extreme <- num / den
 write.csv(proba_extreme, file = "ProbaExtremeWeek3.csv")
 ```
 
-### 2019 standardized excesses
+#### 2019 standardized excesses
 
 ```{r 2019 data}
 incidences2019 <- subset(x = incidences, subset = (season == 2019))
@@ -761,12 +1432,12 @@ epid_data2019$excess_stand <- rep(NA, length(epid_data2019$season))
 
 for (j in unique(epid_data2019$season)) {
   temp <- epid_data2019[epid_data2019$season == j, ]
-  if (sum(temp$t_inc_cent > thres_gpd, na.rm = T) == 0) {
+  if (sum(temp$t_inc > thres_gpd, na.rm = T) == 0) {
     epid_data2019[epid_data2019$season == j, ]$excess <- rep(NA, d)
   }
   else {
     epid_data2019[epid_data2019$season == j, ]$excess <-
-      temp$t_inc_cent - thres_gpd
+      temp$t_inc- thres_gpd
   }
 }
 
@@ -776,24 +1447,32 @@ for (i in 1:d) {
 }
 ```
 
-### Fix exceedances thresholds
+#### Fix exceedances thresholds
+
+We will estimate the probabilty that the Week 3 ILI incidence rates will exceed the following thresholds defined as multiple of the observed maximum of  ILI rates of the third weeks of all epidemics (which is equal to `r max(epid_data[epid_data$weeks == 3, ]$t_inc)`).
 
 ```{r exceedance thresholds}
-thres_cent <- max(epid_data[epid_data$weeks == 3, ]$t_inc_cent)
-thres_stand <- (thres_cent-thres_gpd[3])/sigma_univ[3]
+thres <- max(epid_data[epid_data$weeks == 3, ]$t_inc)
+thres_stand <- (thres-thres_gpd[3])/sigma_univ[3]
 mult_pred <- c(0.5, 0.75,0.95,1,1.2)
 
 thres_pred <- mult_pred*thres_stand
 write.csv(thres_pred, file="FixedPredThresWeek3.csv")
+
+thres_max <- data.frame(t(mult_pred*thres))
+colnames(thres_max) <- c("0.5", "0.75", "0.95", "1", "1.2")
+rownames(thres_max) <- c( "thresholds")
+kable(thres_max)
 ```
 
-### Table 6. a)
+### Table 4 a)
 
-```{r table 6a)}
-proba.pred <- matrix(0, nrow = 1, ncol = length(thres_pred))
-proba.predict_GPD <- matrix(0, nrow = 1, ncol = length(thres_pred))
+```{r table 4a)}
+proba.pred <- matrix(NA, nrow = 1, ncol = length(thres_pred))
+proba.predict_GPD <- matrix(NA, nrow = 1, ncol = length(thres_pred))
 proba.predict_LOGIT <-
-  matrix(0, nrow = 1, ncol = length(thres_pred))
+  matrix(NA, nrow = 1, ncol = length(thres_pred))
+
 topredict_2019 <-
   data.frame(week1 = epid_data2019[epid_data2019$weeks == 1,]$excess_stand,
              week2 = epid_data2019[epid_data2019$weeks == 2,]$excess_stand)
@@ -810,25 +1489,23 @@ for (i in 1:length(thres_pred)) {
       beta = est.beta_M1
     ) * proba_extreme_3g12(x12 = x12)
   
-  reg_2019 <-
-    data.frame(
-      week1 = epid_data_ssNA[epid_data_ssNA$weeks == 1, ]$excess_stand,
-      week2 = epid_data_ssNA[epid_data_ssNA$weeks == 2, ]$excess_stand,
-      P3 = as.numeric(epid_data_ssNA[epid_data_ssNA$weeks == 3, ]$excess_stand > thres_pred[i])
-    )
-  
-  fit_2019 <- brglm(
-    formula = P3 ~ week1 + week2,
-    data = reg_2019,
-    family = binomial,
-    maxit = 100
-  )
-  
-  proba.predict_LOGIT[, i] <-  predict(object = fit_2019,
-                                       newdata = topredict_2019,
+}
+ reg_2019 <-
+    matrix(data = c(epid_data_ssNA[epid_data_ssNA$weeks == 1, ]$excess_stand,
+       epid_data_ssNA[epid_data_ssNA$weeks == 2, ]$excess_stand),ncol = 2)
+    
+for (i in 1:2){
+
+      response <- as.numeric(epid_data_ssNA[epid_data_ssNA$weeks == 3, ]$excess_stand > thres_pred[i])
+    
+    
+  fit <- glmnet(x = reg_2019, y = response, family = "binomial", alpha = 0, lambda = 1)
+
+  proba.predict_LOGIT[, i] <-  predict(object = fit,
+                                       newx = matrix(x12, ncol =2),
                                        type = "response")
 }
-proba.pred <- data.frame(matrix(c(thres_pred,
+proba.pred <- data.frame(matrix(c(thres*mult_pred,
                     proba.predict_GPD,
                     proba.predict_LOGIT), ncol =  5, byrow = T))
 colnames(proba.pred) <- c("0.5", "0.75", "0.95", "1", "1.2")
@@ -837,7 +1514,8 @@ kable(proba.pred)
 ```
 
 
-## Section 6.1 : leave-one-out cross-validation
+
+## Section 5.2 i) : leave-one-out cross-validation
 
 ### Data + GPD thresholds
 
@@ -845,11 +1523,11 @@ kable(proba.pred)
 epid_data_8519 <- rbind(epid_data, epid_data2019)
 nb.epid <- length(unique(epid_data_8519$season))
 
-level_gpd <- c(0.3, 0.3, 0.3)
+level_gpd <- c(0.9, 0.9, 0.9)
 thres_gpd <- rep(NA, 3)
 for (i in 1:3) {
   thres_gpd[i] <-
-    quantile(epid_data_8519[epid_data_8519$weeks == i, ]$t_inc_cent, probs = level_gpd[i], na.rm = T)
+    quantile(incidences$t_inc, probs = level_gpd[i], na.rm = T)
 }
 ```
 
@@ -872,7 +1550,7 @@ for (i in 1:nb.epid) {
   for (k in 1:d) {
     week <-
       epid_data_LOO[(epid_data_LOO$weeks == k) &
-                      !is.na(epid_data_LOO$t_inc), ]$t_inc_cent
+                      !is.na(epid_data_LOO$t_inc), ]$t_inc
     univ.fit <-
       fevd(
         x = week,
@@ -889,12 +1567,12 @@ for (i in 1:nb.epid) {
     rep(NA, length(epid_data_LOO$season))
   for (j in epid_data_LOO$season) {
     temp <- epid_data_LOO[epid_data_LOO$season == j,]
-    if (sum(temp$t_inc_cent > thres_gpd[1:d], na.rm = T) == 0) {
+    if (sum(temp$t_inc > thres_gpd[1:d], na.rm = T) == 0) {
       epid_data_LOO[epid_data_LOO$season == j,]$excess <- rep(NA, d)
     }
     else {
       epid_data_LOO[epid_data_LOO$season == j,]$excess <-
-        temp$t_inc_cent - thres_gpd[1:d]
+        temp$t_inc - thres_gpd[1:d]
     }
   }
   
@@ -911,7 +1589,7 @@ for (i in 1:nb.epid) {
   epid_data_test$excess_stand <- rep(0, 3)
   for (k in 1:d) {
     epid_data_test[epid_data_test$weeks == k,]$excess <-
-      epid_data_test[epid_data_test$weeks == k,]$t_inc_cent - thres_gpd[k]
+      epid_data_test[epid_data_test$weeks == k,]$t_inc - thres_gpd[k]
     epid_data_test[epid_data_test$weeks == k,]$excess_stand <-
       epid_data_test[epid_data_test$weeks == k,]$excess / sigma_univ[k]
   }
@@ -927,7 +1605,7 @@ LOO_fit_parallel <- foreach(
   .packages = c("extRemes", "pracma"),
   .combine = rbind
 ) %dopar% {
-  LOO_fit(i,train_list = train_list, thres_gpd = thres_gpd)
+  LOO_fit(i,train_list = train_list)
 }
 
 res.fitLOO_week3 <- data.frame(LOO_fit_parallel)
@@ -952,19 +1630,18 @@ for (i in 1:nb.epid) {
 
 ### Leave-one-out prediction 
 
-```{r LOO predict}
-
-res_parallel <- foreach(
+```{r LOO predict GPD}
+res_parallel_GPD <- foreach(
   i = 1:nb.epid,
-  .packages = c("extRemes", "brglm", "pracma"),
+  .packages = c("extRemes", "pracma"),
   .combine = rbind
 ) %dopar% {
-  pred_parallel(i, train_list = train_list, test_list = test_list)
+  pred_parallel_GPD(i, train_list = train_list, test_list = test_list, thres_pred = thres_pred)
 }
 
 
-res_week3_LOO <- data.frame(res_parallel)
-colnames(res_week3_LOO) <-
+res_week3_LOO_GPD <- data.frame(res_parallel_GPD)
+colnames(res_week3_LOO_GPD) <-
   c(
     "Week3",
     "Predict_Gumbel_05",
@@ -972,22 +1649,41 @@ colnames(res_week3_LOO) <-
     "Predict_Gumbel_095",
     "Predict_Gumbel_1",
     "Predict_Gumbel_12",
+    "LLK"
+  )
+
+res_week3_LOO_GPD$season <- 1985:2019
+```
+
+```{r LOO predict LOGIT}
+
+res_parallel_LOGIT<- foreach(
+  i = 1:nb.epid,
+  .packages = c("glmnet"),
+  .combine = rbind
+) %dopar% {
+  pred_parallel_LOGIT(i, train_list = train_list, test_list = test_list, thres_pred = thres_pred)
+}
+
+
+res_week3_LOO_LOGIT <- data.frame(res_parallel_LOGIT)
+colnames(res_week3_LOO_LOGIT) <-
+  c(
     "Predict_Logit_05",
     "Predict_Logit_075",
     "Predict_Logit_095",
     "Predict_Logit_1",
-    "Predict_Logit_12",
-    "LLK"
+    "Predict_Logit_12"
   )
 
-res_week3_LOO$season <- 1985:2019
+res_week3_LOO <- cbind(res_week3_LOO_GPD, res_week3_LOO_LOGIT)
 ```
 
-## Brier plots (Figures 5a) and b)
+### Prediction probabilities plots (Figures 4a) and b))
 
-### Threshold = 0.5 $\times$ max = 816 (Figure 5a))
+#### Threshold = 0.5 $\times$ max = 864 (Figure 4a))
 
-```{r brierplot05}
+```{r BrierReal05}
 
 res_week3_05 <-
   subset(res_week3_LOO,
@@ -999,39 +1695,41 @@ res_week3_05$Outcome <-
 x.plot <-
   ggplot(data = res_week3_05, aes(x = as.factor(Outcome), y = Predict_Gumbel_05))
 x.plot <-
-  x.plot  +  geom_point(shape = 1)
+  x.plot  +  geom_point(shape = 1, size = 3)
 x.plot <- x.plot + ggtitle("GP prediction")
 x.plot <-
   x.plot + xlab("Outcome") + ylab("Prediction probability")
 x.plot <- x.plot + theme(
   panel.grid.minor = element_blank(),
-  text = element_text(size = 10),
-  axis.text.x = element_text(size = 8),
-  axis.text.y = element_text(size = 8),
-  plot.title = element_text(size = 10)
+  text = element_text(size = 16),
+  axis.text.x = element_text(size = 14),
+  axis.text.y = element_text(size = 14),
+  plot.title = element_text(size = 18)
 )
+x.plot <- x.plot + ylim(0,1)
 
 y.plot <-
   ggplot(data = res_week3_05, aes(x = as.factor(Outcome), y = Predict_Logit_05))
 y.plot <-
-  y.plot +  geom_point(shape = 1)
-y.plot <- y.plot + ggtitle("Logistic regression")
+  y.plot +  geom_point(shape = 1, size = 3)
 y.plot <-
   y.plot + xlab("Outcome") + ylab("Prediction probability")
 y.plot <- y.plot + theme(
   panel.grid.minor = element_blank(),
-  text = element_text(size = 10),
-  axis.text.x = element_text(size = 8),
-  axis.text.y = element_text(size = 8),
-  plot.title = element_text(size = 10)
+  text = element_text(size = 16),
+  axis.text.x = element_text(size = 14),
+  axis.text.y = element_text(size = 14),
+  plot.title = element_text(size = 18)
 )
+y.plot <- y.plot + ggtitle("Logistic regression")
+y.plot <- y.plot + ylim(0,1)
 
 z.plot <- grid.arrange(x.plot, y.plot, ncol = 2)
 ```
 
-### Threshold = 0.75 $\times$ max = 1,224 (Figure 5b))
+#### Threshold = 0.75 $\times$ max = 1,297 (Figure 4b))
 
-```{r brierplot075}
+```{r BrierReal075}
 
 res_week3_075 <-
   subset(res_week3_LOO,
@@ -1043,45 +1741,46 @@ res_week3_075$Outcome <-
 x.plot <-
   ggplot(data = res_week3_075, aes(x = as.factor(Outcome), y = Predict_Gumbel_075))
 x.plot <-
-  x.plot + geom_point(shape = 1)
+  x.plot + geom_point(shape = 1, size = 3)
 x.plot <- x.plot + ggtitle("GP prediction")
 x.plot <-
   x.plot + xlab("Outcome") + ylab("Prediction probability")
 x.plot <- x.plot + theme(
   panel.grid.minor = element_blank(),
-  text = element_text(size = 10),
-  axis.text.x = element_text(size = 8),
-  axis.text.y = element_text(size = 8),
-  plot.title = element_text(size = 10)
+  text = element_text(size = 16),
+  axis.text.x = element_text(size = 14),
+  axis.text.y = element_text(size = 14),
+  plot.title = element_text(size = 18)
 )
-x.plot
+x.plot <- x.plot + ylim(0,1)
 
 y.plot <-
   ggplot(data = res_week3_075, aes(x = as.factor(Outcome), y = Predict_Logit_075))
 y.plot <-
-  y.plot +  geom_point(shape = 1)
+  y.plot +  geom_point(shape = 1, size = 3)
 y.plot <- y.plot + ggtitle("Logistic regression")
 y.plot <-
   y.plot + xlab("Outcome") + ylab("Prediction probability")
 y.plot <- y.plot + theme(
   panel.grid.minor = element_blank(),
-  text = element_text(size = 10),
-  axis.text.x = element_text(size = 8),
-  axis.text.y = element_text(size = 8),
-  plot.title = element_text(size = 10)
+  text = element_text(size = 16),
+  axis.text.x = element_text(size = 14),
+  axis.text.y = element_text(size = 14),
+  plot.title = element_text(size = 18)
 )
+y.plot <- y.plot + ylim(0,1)
 
 
 z.plot <- grid.arrange(x.plot, y.plot, ncol = 2)
 ```
 
-### Threshold = 0.95 $\times$ max = 1,551  (not shown)
+#### Threshold = 0.95 $\times$ max = 1,642  (not shown)
 
-```{r brierplot095}
+```{r BrierReal095}
 
 res_week3_095 <-
   subset(res_week3_LOO,
-         select = c(Week3, Predict_Gumbel_095, Predict_Logit_095))
+         select = c(Week3, Predict_Gumbel_095))
 res_week3_095$Outcome <-
   as.numeric(res_week3_095$Week3 > thres_pred[3])
 
@@ -1089,41 +1788,24 @@ res_week3_095$Outcome <-
 x.plot <-
   ggplot(data = res_week3_095, aes(x = as.factor(Outcome), y = Predict_Gumbel_095))
 x.plot <-
-  x.plot + geom_point(shape = 1)
+  x.plot + geom_point(shape = 1, size = 3)
 x.plot <- x.plot + ggtitle("GP prediction")
 x.plot <-
   x.plot + xlab("Outcome") + ylab("Prediction probability")
 x.plot <- x.plot + theme(
   panel.grid.minor = element_blank(),
-  text = element_text(size = 10),
-  axis.text.x = element_text(size = 8),
-  axis.text.y = element_text(size = 8),
-  plot.title = element_text(size = 10)
+  text = element_text(size = 16),
+  axis.text.x = element_text(size = 14),
+  axis.text.y = element_text(size = 14),
+  plot.title = element_text(size = 18)
 )
+x.plot <- x.plot + ylim(0,1)
 x.plot
-
-y.plot <-
-  ggplot(data = res_week3_095, aes(x = as.factor(Outcome), y = Predict_Logit_095))
-y.plot <-
-  y.plot +  geom_point(shape = 1)
-y.plot <- y.plot + ggtitle("Logistic regression")
-y.plot <-
-  y.plot + xlab("Outcome") + ylab("Prediction probability")
-y.plot <- y.plot + theme(
-  panel.grid.minor = element_blank(),
-  text = element_text(size = 10),
-  axis.text.x = element_text(size = 8),
-  axis.text.y = element_text(size = 8),
-  plot.title = element_text(size = 10)
-)
-
-
-z.plot <- grid.arrange(x.plot, y.plot, ncol = 2)
 ```
 
-### Threshold = 1 $\times$ max = 1,632  (not shown)
+#### Threshold = 1 $\times$ max = 1,729  (not shown)
 
-```{r brierplot1}
+```{r BrierReal1}
 
 res_week3_1 <-
   subset(res_week3_LOO, select = c(Week3, Predict_Gumbel_1))
@@ -1133,23 +1815,23 @@ res_week3_1$Outcome <- as.numeric(res_week3_1$Week3 > thres_pred[4])
 x.plot <-
   ggplot(data = res_week3_1, aes(x = as.factor(Outcome), y = Predict_Gumbel_1))
 x.plot <-
-  x.plot + geom_point(shape = 1)
+  x.plot + geom_point(shape = 1, size = 3)
 x.plot <- x.plot + ggtitle("GP prediction")
 x.plot <-
   x.plot + xlab("Outcome") + ylab("Prediction probability")
 x.plot <- x.plot + theme(
   panel.grid.minor = element_blank(),
-  text = element_text(size = 10),
-  axis.text.x = element_text(size = 8),
-  axis.text.y = element_text(size = 8),
-  plot.title = element_text(size = 10)
+  text = element_text(size = 16),
+  axis.text.x = element_text(size = 14),
+  axis.text.y = element_text(size = 14),
+  plot.title = element_text(size = 18)
 )
-x.plot
+x.plot <- x.plot + ylim(0,1)
 ```
 
-### Threshold = 1.2 $\times$ max = 1,959  (not shown)
+#### Threshold = 1.2 $\times$ max = 2,075  (not shown)
 
-```{r brierplot12}
+```{r BrierReal12}
 
 res_week3_12 <-
   subset(res_week3_LOO, select = c(Week3, Predict_Gumbel_12))
@@ -1160,22 +1842,24 @@ res_week3_12$Outcome <-
 x.plot <-
   ggplot(data = res_week3_12, aes(x = as.factor(Outcome), y = Predict_Gumbel_12))
 x.plot <-
-  x.plot + geom_point(shape = 1)
+  x.plot + geom_point(shape = 1, size = 3)
 x.plot <- x.plot + ggtitle("GP prediction")
 x.plot <-
   x.plot + xlab("Outcome") + ylab("Prediction probability")
 x.plot <- x.plot + theme(
   panel.grid.minor = element_blank(),
-  text = element_text(size = 10),
-  axis.text.x = element_text(size = 8),
-  axis.text.y = element_text(size = 8),
-  plot.title = element_text(size = 10)
+  text = element_text(size = 16),
+  axis.text.x = element_text(size = 14),
+  axis.text.y = element_text(size = 14),
+  plot.title = element_text(size = 18)
 )
+x.plot <- x.plot + ylim(0,1)
 x.plot
+
 ```
 
-### Table 7
-```{r table 7}
+#### Table 6 (Week 3) - Standardized Brier scores
+```{r table 6}
 ## 0.5
 p_05 <- mean(res_week3_05$Outcome)
 brier_gumbel_05 <- 1 - mean((res_week3_05$Predict_Gumbel_05 - res_week3_05$Outcome) ^ 2) /
@@ -1215,34 +1899,297 @@ brier_gumbel_12 <-
   1 - mean((res_week3_12$Predict_Gumbel_12 - res_week3_12$Outcome) ^ 2) /
   (p_12 * (1 - p_12))
 
-brier_score <- data.frame(matrix(c(0.5, 0.75, 0.95, 1, 1.2, brier_gumbel_05, brier_gumbel_075, brier_gumbel_095, brier_gumbel_1, brier_gumbel_12, brier_logit_05, brier_logit_075, brier_logit_095, NA, NA), byrow = T, ncol = 5))
-rownames(brier_score) <- c("Multiple", "GP", "Logistic")
+brier_score <- data.frame(matrix(c( brier_gumbel_05, brier_gumbel_075, brier_gumbel_095, brier_gumbel_1, brier_gumbel_12, brier_logit_05, brier_logit_075, brier_logit_095, NA, NA), byrow = T, ncol = 5))
+rownames(brier_score) <- c( "GP", "Logistic")
+colnames(brier_score) <- c(0.5, 0.75, 0.95, 1, 1.2)
 kable(brier_score)
 ```
 
 
-## Section 5.3
+## ROC and AUC (not shown in the paper)
 
-### Figure 4
+### Threshold = 0.5 $\times$ max = 864
 
-```{r prepare dataframe for graph}
-anomaly.df <- data.frame(season = unique(epid_data_8519$season))
-anomaly.df$t_inc <- rep(0, nb.epid)
-anomaly.df$t_inc_cent <- rep(0, nb.epid)
-anomaly.df$excess <- rep(0, nb.epid)
-anomaly.df$excess_stand <- rep(0, nb.epid)
-for (i in 1:nb.epid) {
-  toto <- unlist(test_list[[i]][3, 3:6])
-  anomaly.df[i, ]$t_inc <- toto[1]
-  anomaly.df$t_inc_cent[i] <- toto[2]
-  anomaly.df$excess[i] <- toto[3]
-  anomaly.df$excess_stand[i] <- toto[4]
+```{r PRCReal05}
+dis.thres_LOGIT <- sort(res_week3_05$Predict_Logit_05, decreasing = TRUE)
+pr.data_LOGIT <-
+  data.frame(DisThres = dis.thres_LOGIT, Model = rep("Logistic", length(dis.thres_LOGIT)))
+for (i in 1:length(dis.thres_LOGIT)) {
+  pr.data_LOGIT$Precision[i] <- sum((res_week3_05$Outcome == 1) &
+                                      (res_week3_05$Predict_Logit_05 > dis.thres_LOGIT[i]) , na.rm = T 
+                                    ) / sum((res_week3_05$Predict_Logit_05 > dis.thres_LOGIT[i]), na.rm = T)
+  pr.data_LOGIT$Recall[i] <- sum((res_week3_05$Outcome == 1) &
+                                      (res_week3_05$Predict_Logit_05 > dis.thres_LOGIT[i]), na.rm = T 
+                                    ) / sum( (res_week3_05$Outcome == 1))
 }
 
-anomaly.df <- anomaly.df[(anomaly.df$season<2016)|(anomaly.df$season>2017),]
-anomaly.df$LLK <- -log(res_week3_LOO[(res_week3_LOO$season<2016)|(res_week3_LOO$season>2017),]$LLK)
+
+dis.thres_MGPD <- sort(res_week3_05$Predict_Gumbel_05, decreasing = TRUE)
+pr.data_MGPD <-
+  data.frame(DisThres = c(dis.thres_MGPD),
+             Model = rep("Gumbel", length(dis.thres_MGPD)))
+
+for (i in 1:length(dis.thres_MGPD)) {
+
+   pr.data_MGPD$Precision[i] <- sum((res_week3_05$Outcome == 1) &
+                                      (res_week3_05$Predict_Gumbel_05 > dis.thres_MGPD[i]) , na.rm = T 
+                                    ) / sum((res_week3_05$Predict_Gumbel_05 > dis.thres_MGPD[i]) )
+  pr.data_MGPD$Recall[i] <- sum((res_week3_05$Outcome == 1) &
+                                      (res_week3_05$Predict_Gumbel_05 > dis.thres_MGPD[i]), na.rm = T 
+                                    ) / sum( (res_week3_05$Outcome == 1))
+}
 
 
+
+### Precision and recall ### 
+pr.data <- rbind(pr.data_MGPD, pr.data_LOGIT)
+
+y.plot <-
+  ggplot(data = pr.data, aes(
+    x = Recall,
+    y = Precision,
+    colour = Model,
+    linetype = Model
+  )) + geom_path()
+y.plot <- y.plot + geom_hline(yintercept = sum( (res_week3_05$Outcome == 1))/length(res_week3_05$Outcome))
+
+y.plot <- y.plot + xlim(c(0, 1)) + ylim(c(0, 1))
+y.plot <- y.plot + scale_color_manual(values = c("blue", "red"))
+y.plot <- y.plot + xlab("Recall") + ylab("Precision")
+y.plot <- y.plot + theme(
+  panel.grid.minor = element_blank(),
+  text = element_text(size = 16),
+  axis.text.x = element_text(size = 14),
+  axis.text.y = element_text(size = 14),
+  plot.title = element_text(size = 18)
+)
+y.plot
+
+
+## AUC PR ###
+auc_pr_GP_05 <- PRAUC(res_week3_05$Predict_Gumbel_05, res_week3_05$Outcome)
+auc_pr_Logit_05 <- PRAUC(res_week3_05[!is.na(res_week3_05$Predict_Logit_05),]$Predict_Logit_05,res_week3_05[!is.na(res_week3_05$Predict_Logit_05),]$Outcome)
+
+##  Average precision score ###
+N <- length(pr.data_MGPD$Recall)
+AP_GP_05 <- sum(pr.data_MGPD$Precision*(pr.data_MGPD$Recall - c(0,pr.data_MGPD$Recall[-N])), na.rm = T)
+AP_LOGIT_05 <- sum(pr.data_LOGIT$Precision*(pr.data_LOGIT$Recall - c(0,pr.data_LOGIT$Recall[-N])), na.rm = T)
+
+```
+
+
+
+
+### Threshold = 0.75 $\times$ max = 1,297
+
+```{r PRCReal075}
+dis.thres_LOGIT <- sort(res_week3_075$Predict_Logit_075, decreasing = TRUE)
+pr.data_LOGIT <-
+  data.frame(DisThres = dis.thres_LOGIT, Model = rep("Logistic", length(dis.thres_LOGIT)))
+for (i in 1:length(dis.thres_LOGIT)) {
+
+  pr.data_LOGIT$Precision[i] <- sum((res_week3_075$Outcome == 1) &
+                                      (res_week3_075$Predict_Logit_075 > dis.thres_LOGIT[i]) , na.rm = T 
+                                    ) / sum((res_week3_075$Predict_Logit_075 > dis.thres_LOGIT[i]), na.rm = T)
+  pr.data_LOGIT$Recall[i] <- sum((res_week3_075$Outcome == 1) &
+                                      (res_week3_075$Predict_Logit_075 > dis.thres_LOGIT[i]), na.rm = T 
+                                    ) / sum( (res_week3_075$Outcome == 1))
+}
+
+
+dis.thres_MGPD <- sort(res_week3_075$Predict_Gumbel_075, decreasing = TRUE)
+pr.data_MGPD <-
+  data.frame(DisThres = c(dis.thres_MGPD),
+             Model = rep("Gumbel", length(dis.thres_MGPD)))
+
+for (i in 1:length(dis.thres_MGPD)) {
+   pr.data_MGPD$Precision[i] <- sum((res_week3_075$Outcome == 1) &
+                                      (res_week3_075$Predict_Gumbel_075 > dis.thres_MGPD[i]) , na.rm = T 
+                                    ) / sum((res_week3_075$Predict_Gumbel_075 > dis.thres_MGPD[i]) )
+  pr.data_MGPD$Recall[i] <- sum((res_week3_075$Outcome == 1) &
+                                      (res_week3_075$Predict_Gumbel_075 > dis.thres_MGPD[i]), na.rm = T 
+                                    ) / sum( (res_week3_075$Outcome == 1))
+}
+
+
+
+### Precision and recall ### 
+pr.data <- rbind(pr.data_MGPD, pr.data_LOGIT)
+
+y.plot <-
+  ggplot(data = pr.data, aes(
+    x = Recall,
+    y = Precision,
+    colour = Model,
+    linetype = Model
+  )) + geom_path()
+y.plot <- y.plot + geom_hline(yintercept = sum( (res_week3_075$Outcome == 1))/length(res_week3_075$Outcome))
+
+y.plot <- y.plot + xlim(c(0, 1)) + ylim(c(0, 1))
+y.plot <- y.plot + scale_color_manual(values = c("blue", "red"))
+y.plot <- y.plot + xlab("Recall") + ylab("Precision")
+y.plot <- y.plot + theme(
+  panel.grid.minor = element_blank(),
+  text = element_text(size = 16),
+  axis.text.x = element_text(size = 14),
+  axis.text.y = element_text(size = 14),
+  plot.title = element_text(size = 18)
+)
+y.plot
+
+
+## AUC PR ###
+auc_pr_GP_075 <- PRAUC(res_week3_075$Predict_Gumbel_075, res_week3_075$Outcome)
+auc_pr_Logit_075 <- PRAUC(res_week3_075[!is.na(res_week3_075$Predict_Logit_075),]$Predict_Logit_075,res_week3_075[!is.na(res_week3_075$Predict_Logit_075),]$Outcome)
+
+
+
+##  Average precision score ###
+N <- length(pr.data_MGPD$Recall)
+AP_GP_075 <- sum(pr.data_MGPD$Precision*(pr.data_MGPD$Recall - c(0,pr.data_MGPD$Recall[-N])), na.rm = T)
+AP_LOGIT_075 <- sum(pr.data_LOGIT$Precision*(pr.data_LOGIT$Recall - c(0,pr.data_LOGIT$Recall[-N])), na.rm = T)
+```
+
+### Threshold = 0.95 $\times$ max = 1,642
+
+```{r PRCReal095}
+dis.thres_MGPD <- sort(res_week3_095$Predict_Gumbel_095, decreasing = TRUE)
+pr.data_MGPD <-
+  data.frame(DisThres = c(dis.thres_MGPD),
+             Model = rep("Gumbel", length(dis.thres_MGPD)))
+
+for (i in 1:length(dis.thres_MGPD)) {
+  
+  pr.data_MGPD$Precision[i] <- sum((res_week3_095$Outcome == 1) &
+                                      (res_week3_095$Predict_Gumbel_095 > dis.thres_MGPD[i]) , na.rm = T 
+                                    ) / sum((res_week3_095$Predict_Gumbel_095 > dis.thres_MGPD[i]) )
+  pr.data_MGPD$Recall[i] <- sum((res_week3_095$Outcome == 1) &
+                                      (res_week3_095$Predict_Gumbel_095 > dis.thres_MGPD[i]), na.rm = T 
+                                    ) / sum( (res_week3_095$Outcome == 1))
+}
+
+### Precision and recall ### 
+pr.data <- rbind(pr.data_MGPD)
+
+y.plot <-
+  ggplot(data = pr.data, aes(
+    x = Recall,
+    y = Precision,
+    colour = Model,
+    linetype = Model
+  )) + geom_path()
+y.plot <- y.plot + geom_hline(yintercept = sum( (res_week3_095$Outcome == 1))/length(res_week3_095$Outcome))
+
+y.plot <- y.plot + xlim(c(0, 1)) + ylim(c(0, 1))
+y.plot <- y.plot + scale_color_manual(values = c("blue"))
+y.plot <- y.plot + xlab("Recall") + ylab("Precision")
+y.plot <- y.plot + theme(
+  panel.grid.minor = element_blank(),
+  text = element_text(size = 16),
+  axis.text.x = element_text(size = 14),
+  axis.text.y = element_text(size = 14),
+  plot.title = element_text(size = 18)
+)
+y.plot
+
+## AUC PR ###
+auc_pr_GP_095 <- PRAUC(res_week3_095$Predict_Gumbel_095, res_week3_095$Outcome)
+
+
+
+##  Average precision score ###
+N <- length(pr.data_MGPD$Recall)
+AP_GP_095 <- sum(pr.data_MGPD$Precision*(pr.data_MGPD$Recall - c(0,pr.data_MGPD$Recall[-N])), na.rm = T)
+
+```
+
+### Threshold = 1 $\times$ max = 1,729
+
+```{r PRCReal1}
+dis.thres_MGPD <- sort(res_week3_1$Predict_Gumbel_1, decreasing = TRUE)
+pr.data_MGPD <-
+  data.frame(DisThres = c(dis.thres_MGPD),
+             Model = rep("Gumbel", length(dis.thres_MGPD)))
+
+
+
+for (i in 1:length(dis.thres_MGPD)) {
+  pr.data_MGPD$Precision[i] <- sum((res_week3_1$Outcome == 1) &
+                                      (res_week3_1$Predict_Gumbel_1 > dis.thres_MGPD[i]) , na.rm = T 
+                                    ) / sum((res_week3_1$Predict_Gumbel_1 > dis.thres_MGPD[i]) )
+  pr.data_MGPD$Recall[i] <- sum((res_week3_1$Outcome == 1) &
+                                      (res_week3_1$Predict_Gumbel_1 > dis.thres_MGPD[i]), na.rm = T 
+                                    ) / sum( (res_week3_1$Outcome == 1))
+}
+
+### Precision and recall ### 
+pr.data <- rbind(pr.data_MGPD)
+
+y.plot <-
+  ggplot(data = pr.data, aes(
+    x = Recall,
+    y = Precision,
+    colour = Model,
+    linetype = Model
+  )) + geom_path()
+y.plot <- y.plot + geom_hline(yintercept = sum( (res_week3_1$Outcome == 1))/length(res_week3_1$Outcome))
+
+y.plot <- y.plot + xlim(c(0, 1)) + ylim(c(0, 1))
+y.plot <- y.plot + scale_color_manual(values = c("blue"))
+y.plot <- y.plot + xlab("Recall") + ylab("Precision")
+y.plot <- y.plot + theme(
+  panel.grid.minor = element_blank(),
+  text = element_text(size = 16),
+  axis.text.x = element_text(size = 14),
+  axis.text.y = element_text(size = 14),
+  plot.title = element_text(size = 18)
+)
+y.plot
+
+
+## AUC PR ###
+auc_pr_GP_1 <- PRAUC(res_week3_1$Predict_Gumbel_1, res_week3_1$Outcome)
+
+
+
+##  Average precision score ###
+N <- length(pr.data_MGPD$Recall)
+AP_GP_1 <- sum(pr.data_MGPD$Precision*(pr.data_MGPD$Recall - c(0,pr.data_MGPD$Recall[-N])), na.rm = T)
+
+
+```
+
+
+### Threshold = 1.2 $\times$ max = 2,075
+
+Cannot be computed because there is no exceedance of this threshold. 
+
+### Table of AUC for PRC ###
+
+```{r auc for prc}
+auc_prc <- data.frame(matrix(c(auc_pr_GP_05, auc_pr_GP_075, auc_pr_GP_095, auc_pr_GP_1, NA, auc_pr_Logit_05, auc_pr_Logit_075, NA, NA, NA), byrow = T, ncol = 5))
+ rownames(auc_prc) <- c( "GP", "Logistic")
+colnames(auc_prc) <- c(0.5, 0.75, 0.95, 1, 1.2)
+kable(auc_prc) 
+```
+
+
+### Table of Average Precision Score ###
+
+```{r aps}
+aprec_score <- data.frame(matrix(c(AP_GP_05, AP_GP_075, AP_GP_095, AP_GP_1, NA, AP_LOGIT_05, AP_LOGIT_075, NA, NA, NA), byrow = T, ncol = 5)) 
+rownames(aprec_score) <- c( "GP", "Logistic") 
+colnames(aprec_score) <- c(0.5, 0.75, 0.95, 1, 1.2) 
+kable(aprec_score)
+```
+
+
+## Section 4.3
+
+```{r prepare dataframe}
+anomaly.df <- data.frame(season = unique(epid_data_8519$season))
+anomaly.df$LLK <- -log(res_week3_LOO$LLK)
+anomaly.df <- anomaly.df[-c(30,32),]
 ```
 
 
@@ -1252,19 +2199,15 @@ simul.dataU_Gumbel <-
   read.csv("SimulatedDataWeek3.csv",
     row.names = 1
   )
-nb.epid_simus <- dim(simul.dataU_Gumbel)[1] / (33*3)
-d <- dim(simul.dataU_Gumbel)[2]
-simul.dataU_Gumbel$season <- rep(1:nb.epid_simus, each = 3)
-
 simulGumbel_W3 <- simul.dataU_Gumbel[simul.dataU_Gumbel$weeks == 3, ]
 q99 <- quantile(simulGumbel_W3$excess, probs = 0.99)
-index1 <- which(simulGumbel_W3$excess > q99-1e-3)
+index1 <- which(simulGumbel_W3$excess > q99-1e-5)
 temp <- simulGumbel_W3[index1, ]
-index2 <- which(temp[temp$weeks == 3,]$excess < q99+1e-3)
+index2 <- which(temp[temp$weeks == 3,]$excess < q99+1e-5)
 ```
 
 ```{r add extreme}
-extreme.point.season <- temp[index2[2], ]$season
+extreme.point.season <- temp[index2, ]$season
 extreme.point.df <-
   simul.dataU_Gumbel[simul.dataU_Gumbel$season == extreme.point.season,]
 extreme.point.vec <- as.vector(extreme.point.df$excess)
@@ -1275,9 +2218,9 @@ extreme.point.df$LLK <- -log(LLK.extreme)
 
 ```{r add abnormal}
 abnormal.point.vec <-
-  c(extreme.point.vec[1] * 2,
-    extreme.point.vec[2] * 0.1,
-    extreme.point.vec[3] * 2)
+  c(extreme.point.vec[1] * 1.5,
+    extreme.point.vec[2] * 0.5,
+    extreme.point.vec[3] * 1.5)
 abnormal.point.df <-
   data.frame(season = rep(1, 3),
              weeks = 1:3,
@@ -1290,35 +2233,42 @@ abnormal.point.df$LLK <- -log(LLK.abnormal)
 
 ```{r swine}
 swine.point.df <- data.frame(
-  season = rep(2010, 3),
-  weeks = 1:3,
-  excess = anomaly.df[anomaly.df$season == 2010,]$excess_stand,
+  season = 2010,
   LLK = anomaly.df[anomaly.df$season == 2010,]$LLK
 )
 ```
 
-```{r cut off}
+### Table 4
+
+```{r table 4}
 res_week3_simus <-
   read.csv(file = "PredSimus_Week3.csv", row.names = 1)
 
 LLKsimus <- -log(res_week3_simus$LLK)
 levels.10 <- quantile(LLKsimus, probs = 0.9)
 levels.5 <- quantile(LLKsimus, probs = 0.95)
-levels.1 <- quantile(LLKsimus, probs = 0.99)
+levels.1<- quantile(LLKsimus, probs = 0.99)
 levels.01 <- quantile(LLKsimus, probs = 0.999)
+
+tab4 <- data.frame(t(c(levels.10, levels.5,levels.1, levels.01)))
+rownames(tab4) <- c("level")
+colnames(tab4) <- c("10%", "5%", "1%", "0.1%")
+kable(tab4)
 ```
 
-```{r figure 4}
+### Figure 3
+
+```{r LOO_LLK}
 x.plot <-
-  ggplot(data = anomaly.df, aes(x = c(1985:2015, 2018, 2019), y = LLK))
+  ggplot(data = anomaly.df, aes(x = season, y = LLK))
 x.plot <-
   x.plot + geom_point(shape = 1)
 x.plot <-
-  x.plot + geom_point(data = extreme.point.df, aes(2001, LLK), shape = 15, size = 2)
+  x.plot + geom_point(data = extreme.point.df, aes(2001, LLK), shape = 15, size = 2)#square
 x.plot <-
-  x.plot + geom_point(data = abnormal.point.df, aes(2015, LLK), shape = 17, size = 2)
+  x.plot + geom_point(data = abnormal.point.df, aes(2015, LLK), shape = 17, size = 2) #triangle
 x.plot <-
-  x.plot + geom_point(data = swine.point.df, aes(2010, LLK), shape = 19, size = 2)
+  x.plot + geom_point(data = swine.point.df, aes(2010, LLK), shape = 19, size = 2)#circle
 x.plot <-
   x.plot + geom_hline(yintercept = levels.1,
                       linetype = 2,
@@ -1331,13 +2281,10 @@ x.plot <-
   x.plot + xlab("Season") + ylab("Negative log-likelihood")
 x.plot <- x.plot + theme(
   panel.grid.minor = element_blank(),
-  text = element_text(size = 10),
-  axis.text.x = element_text(size = 8),
-  axis.text.y = element_text(size = 8)
+  text = element_text(size = 16),
+  axis.text.x = element_text(size = 12),
+  axis.text.y = element_text(size = 12),
+  plot.title = element_text(size = 18)
 )
 x.plot
 ```
-
-
-
-
