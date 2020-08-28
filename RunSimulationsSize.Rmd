@@ -3,14 +3,23 @@ title: "Codes for Simulated data for Size"
 output:
   html_document:
     df_print: paged
+    fig_caption : yes
 ---
 
 ## Preamble
-
+```{r options}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE,  fig.path = "figures/", fig.process = function(filename) {
+    new_filename <- stringr::str_remove(string = filename,
+                                        pattern = "-1")
+    fs::file_move(path = filename, new_path = new_filename)
+    ifelse(fs::file_exists(new_filename), new_filename, filename)
+  })
+```
 
 ```{r setting packages}
-libs <- c("ggplot2", "pracma", "brglm", "extRemes", "foreach", "doParallel", "gridExtra", "ismev", "pROC")
+libs <- c("ggplot2", "pracma", "glmnet", "extRemes", "foreach", "doParallel", "gridExtra", "pROC", "MLmetrics")
 sapply(libs,require,character.only = T, quietly = TRUE, warn.conflicts = FALSE)
+set.seed(29106799)
 ```
 
 ```{r function files}
@@ -20,7 +29,7 @@ knit("PredictEpidemicTools.Rmd",quiet = TRUE)
 
 ```{r parallel coding settings}
 detectCores()
-cl <- makeCluster(3) #set for 4 cores
+cl <- makeCluster(35) #set to number of cores -1
 
 registerDoParallel(cl)
 
@@ -32,7 +41,7 @@ getDoParWorkers()
 ```{r import simulated data}
 simul.dataU_Gumbel <- read.csv("SimulatedDataSize.csv", row.names = 1)
 
-nb.epid_simus <- dim(simul.dataU_Gumbel)[1] / (32*3)
+nb.epid_simus <- dim(simul.dataU_Gumbel)[1] / (33*3)
 d <- dim(simul.dataU_Gumbel)[2]
 ```
 
@@ -56,9 +65,12 @@ simul_excess_stand_matrix <-
   matrix(simul.dataU_Gumbel$excess, ncol = d, byrow = T)
 n <- dim(simul_excess_stand_matrix)[1]
 
-nb_replicates <- n / 32 ##nb of datasets of 32 epidemics
+nb_replicates <- n / 33 ##nb of datasets of 33 epidemics
 split_index <- split(1:n, 1:nb_replicates)
 ```
+
+
+Number of datasets of 33 epidemics = `r nb_replicates`. 
 
 ## Define train sets
 
@@ -77,9 +89,9 @@ for (i in 1:nb_replicates) {
 ```{r parallel fit }
 Res.fit_parallel <- foreach(
   i = 1:nb_replicates,
-  .packages = c("extRemes","brglm", "pracma"),
+  .packages = c("extRemes","pracma"),
   .combine = rbind) %dopar% {
-  FitParallelSimus(i,excess_list = excess_list)
+  FitParallelSimus_Size(i,excess_list = excess_list)
 }
 
 res.fitSimus_Size <- data.frame(Res.fit_parallel)
@@ -116,7 +128,7 @@ for (i in 1:nb_replicates) {
 ```{r pred thresholds}
 thres_pred <-
   read.csv(
-    "FixedPredThres.csv",
+    "FixedPredThresSize.csv",
     row.names = 1
   )
 thres_pred <- as.vector(t(thres_pred))
@@ -125,18 +137,18 @@ thres_pred <- as.vector(t(thres_pred))
 
 ## Parallel prediction for each simulated data set
 
-```{r parallel pred Size}
+```{r parallel pred Size GPD}
 res_parallel <- foreach(
   i = 1:nb_replicates,
-  .packages = c("extRemes",  "pracma"),
+  .packages = c("pracma", "extRemes"),
   .combine = rbind
 ) %dopar% {
-  PredParallelSimus(i, split_index = split_index)
+  PredParallelSimusGPD(i, excess_list = excess_list, thres_pred = thres_pred)
 }
 
 
-res_Size <- data.frame(res_parallel)
-colnames(res_Size) <-
+res_size_GPD <- data.frame(res_parallel)
+colnames(res_size_GPD) <-
   c(
     "Size",
     "Predict_Gumbel_05",
@@ -144,30 +156,49 @@ colnames(res_Size) <-
     "Predict_Gumbel_095",
     "Predict_Gumbel_1",
     "Predict_Gumbel_12",
-    "Predict_Logit_05",
-    "Predict_Logit_075",
-    "Predict_Logit_095",
-    "Predict_Logit_1",
-    "Predict_Logit_12",
     "LLK"
   )
 ```
 
+```{r parallel pred Size Logit}
+res_parallel <- foreach(
+  i = 1:nb_replicates,
+  .packages = c("glmnet"),
+  .combine = rbind
+) %dopar% {
+  PredParallelSimusLogit(i, excess_list = excess_list, thres_pred = thres_pred)
+}
+
+
+res_size_Logit <- data.frame(res_parallel)
+colnames(res_size_Logit) <-
+  c(
+    "Predict_Logit_05",
+    "Predict_Logit_075",
+    "Predict_Logit_095",
+    "Predict_Logit_1",
+    "Predict_Logit_12"
+  )
+```
+
+```{r}
+res_size <- cbind(res_size_GPD, res_size_Logit)
+write.csv(x = res_size, file = "PredSimus_Size.csv")
+```
 
 ## Prediction with true model
 
 ```{r pred parallel true}
 res_parallel_true <- foreach(
   i = 1:nb_replicates,
-  .packages = c("extRemes",  "pracma"),
   .combine = rbind
 ) %dopar% {
-  PredParallelTrue(i, split_index = split_index)
+  PredParallelTrue(i, excess_list = excess_list, thres_pred = thres_pred)
 }
 
 
-res_true_Size <- data.frame(res_parallel_true)
-colnames(res_true_Size) <-
+res_true_size <- data.frame(res_parallel_true)
+colnames(res_true_size) <-
   c(
     "Size",
     "Predict_True_05",
@@ -177,818 +208,743 @@ colnames(res_true_Size) <-
     "Predict_True_12"
   )
 
-res_Size <- cbind(res_Size, res_true_Size[, -1])
+res_size <- cbind(res_size, res_true_size[, -1])
 ```
 
+```{r}
+write.csv(x = res_size, file = "PredSimus_Size.csv")
+```
 
-## Brier plots (Figures 6 and 7)
+# Boxplots (Figures 5 and 6 a) b) c) and d))
+```{r}
+thres_pred <-
+  read.csv(
+    "FixedPredThresSize.csv",
+    row.names = 1
+  )
+thres_pred <- as.vector(t(thres_pred))
 
-### Threshold = 0.5 $\times$ max = 3,620
+res_size <- read.csv(file = "PredSimus_Size.csv", row.names = 1)
+```
 
-#### Figure 6 a) 
-```{r logistic brierplot05}
-res_Size_05 <-
-  subset(res_Size,
+### Threshold 4,031 ($\kappa = 0.5$)
+
+
+```{r res_size_05}
+res_size_05 <-
+  subset(res_size,
          select = c(Size, Predict_Gumbel_05, Predict_Logit_05, Predict_True_05))
-res_Size_05$Outcome <-
-  as.numeric(res_Size_05$Size > thres_pred[1])
-
-x.plot <-
-  ggplot(data = res_Size_05, aes(x = as.factor(Outcome), y = Predict_Gumbel_05))
-x.plot <-
-  x.plot + geom_boxplot(outlier.size = 0.5,
-                        outlier.shape = 1,
-                        size = 0.5)
-x.plot <- x.plot + ggtitle("GP prediction")
-x.plot <-
-  x.plot + xlab("Outcome") + ylab("Prediction probability")
-x.plot <- x.plot + theme(
-  panel.grid.minor = element_blank(),
-  text = element_text(size = 10),
-  axis.text.x = element_text(size = 8),
-  axis.text.y = element_text(size = 8),
-  plot.title = element_text(size = 10)
-)
-
-y.plot <-
-  ggplot(data = res_Size_05, aes(x = as.factor(Outcome), y = Predict_Logit_05))
-y.plot <-
-  y.plot +  geom_boxplot(outlier.size = 0.5,
-                         outlier.shape = 1,
-                         size = 0.5)
-y.plot <- y.plot + ggtitle("Logistic regression")
-y.plot <-
-  y.plot + xlab("Outcome") + ylab("Prediction probability")
-y.plot <- y.plot + theme(
-  panel.grid.minor = element_blank(),
-  text = element_text(size = 10),
-  axis.text.x = element_text(size = 8),
-  axis.text.y = element_text(size = 8),
-  plot.title = element_text(size = 10)
-)
-
-z.plot <- grid.arrange(x.plot, y.plot, ncol = 2)
+res_size_05$Outcome <-
+  as.numeric(res_size_05$Size > thres_pred[1])
 ```
 
-### Figure 7a)
-```{r true brierplot05}
-x.plot <-
-  ggplot(data = res_Size_05, aes(x = as.factor(Outcome), y = Predict_Gumbel_05))
-x.plot <-
-  x.plot + geom_boxplot(outlier.size = 0.5,
+```{r BrierSimus05_Size_GP}
+BrierSimus05_Size_GP <-
+  ggplot(data = res_size_05, aes(x = as.factor(Outcome), y = Predict_Gumbel_05))
+BrierSimus05_Size_GP <-
+  BrierSimus05_Size_GP + geom_boxplot(outlier.size = 0.5,
                         outlier.shape = 1,
                         size = 0.5)
-x.plot <- x.plot + ggtitle("Estimated model")
-x.plot <-
-  x.plot + xlab("Outcome") + ylab("Prediction probability")
-x.plot <- x.plot + theme(
+BrierSimus05_Size_GP <- BrierSimus05_Size_GP + ggtitle(TeX('Level = $4,031$ ($\\kappa =0.5$)'))
+BrierSimus05_Size_GP <-
+  BrierSimus05_Size_GP + xlab("Outcome") + ylab("Prediction probability")
+BrierSimus05_Size_GP <- BrierSimus05_Size_GP + theme(
   panel.grid.minor = element_blank(),
-  text = element_text(size = 10),
-  axis.text.x = element_text(size = 8),
-  axis.text.y = element_text(size = 8),
-  plot.title = element_text(size = 10)
+  text = element_text(size = 16),
+  axis.text.x = element_text(size = 14),
+  axis.text.y = element_text(size = 14),
+  plot.title = element_text(size = 18)
 )
-
-y.plot <-
-  ggplot(data = res_Size_05, aes(x = as.factor(Outcome), y = Predict_True_05))
-y.plot <-
-  y.plot +  geom_boxplot(outlier.size = 0.5,
-                         outlier.shape = 1,
-                         size = 0.5)
-y.plot <- y.plot + ggtitle("True model")
-y.plot <-
-  y.plot + xlab("Outcome") + ylab("Prediction probability")
-y.plot <- y.plot + theme(
-  panel.grid.minor = element_blank(),
-  text = element_text(size = 10),
-  axis.text.x = element_text(size = 8),
-  axis.text.y = element_text(size = 8),
-  plot.title = element_text(size = 10)
-)
-
-z.plot <- grid.arrange(x.plot, y.plot, ncol = 2)
+BrierSimus05_Size_GP <- BrierSimus05_Size_GP + ylim(0,1)
+BrierSimus05_Size_GP
 ```
 
-### Threshold = 0.75 $\times$ max = 5,431
+```{r BrierSimus05_Size_Logistic}
+BrierSimus05_Size_Logistic <-
+  ggplot(data = res_size_05, aes(x = as.factor(Outcome), y = Predict_Logit_05))
+BrierSimus05_Size_Logistic <-
+  BrierSimus05_Size_Logistic +  geom_boxplot(outlier.size = 0.5,
+                         outlier.shape = 1,
+                         size = 0.5)
+BrierSimus05_Size_Logistic <- BrierSimus05_Size_Logistic + ggtitle(TeX('Level = $4,031$ ($\\kappa =0.5$)'))
+BrierSimus05_Size_Logistic <-
+  BrierSimus05_Size_Logistic + xlab("Outcome") + ylab("Prediction probability")
+BrierSimus05_Size_Logistic <- BrierSimus05_Size_Logistic + theme(
+  panel.grid.minor = element_blank(),
+  text = element_text(size = 16),
+  axis.text.x = element_text(size = 14),
+  axis.text.y = element_text(size = 14),
+  plot.title = element_text(size = 18)
+)
+BrierSimus05_Size_Logistic <- BrierSimus05_Size_Logistic + ylim(0,1)
+```
 
-#### Figure 6 b) 
-```{r logistic brierplot075}
-res_Size_075 <-
-  subset(res_Size,
+```{r BrierSimus05_Size_True}
+BrierSimus05_Size_True <-
+  ggplot(data = res_size_05, aes(x = as.factor(Outcome), y = Predict_True_05))
+BrierSimus05_Size_True <-
+  BrierSimus05_Size_True +  geom_boxplot(outlier.size = 0.5,
+                         outlier.shape = 1,
+                         size = 0.5)
+BrierSimus05_Size_True <- BrierSimus05_Size_True + ggtitle(TeX('Level = $4,031$ ($\\kappa =0.5$)'))
+BrierSimus05_Size_True <-
+  BrierSimus05_Size_True + xlab("Outcome") + ylab("Prediction probability")
+BrierSimus05_Size_True <- BrierSimus05_Size_True + theme(
+  panel.grid.minor = element_blank(),
+  text = element_text(size = 16),
+  axis.text.x = element_text(size = 14),
+  axis.text.y = element_text(size = 14),
+  plot.title = element_text(size = 18)
+)
+BrierSimus05_Size_True <- BrierSimus05_Size_True + ylim(0,1)
+```
+
+```{r pr.data05}
+dis.thres05_LOGIT <- sort(res_size_05$Predict_Logit_05, decreasing = TRUE) 
+ pr.data05_LOGIT <-
+  data.frame(DisThres = dis.thres05_LOGIT, Model = rep("Logistic", length(dis.thres05_LOGIT)))
+  for (i in 1:length(dis.thres05_LOGIT)) {
+  pr.data05_LOGIT$Precision[i] <- sum((res_size_05$Outcome == 1) &
+                                      (res_size_05$Predict_Logit_05 > dis.thres05_LOGIT[i]) , na.rm = T 
+                                    ) / sum((res_size_05$Predict_Logit_05 > dis.thres05_LOGIT[i]), na.rm = T)
+  pr.data05_LOGIT$Recall[i] <- sum((res_size_05$Outcome == 1) &
+                                      (res_size_05$Predict_Logit_05 > dis.thres05_LOGIT[i]), na.rm = T 
+                                    ) / sum( (res_size_05$Outcome == 1))
+}
+
+
+dis.thres05_MGPD <- sort(res_size_05$Predict_Gumbel_05, decreasing = TRUE)
+pr.data05_MGPD <-
+  data.frame(DisThres = c(dis.thres05_MGPD),
+             Model = rep("Gumbel", length(dis.thres05_MGPD)))
+
+for (i in 1:length(dis.thres05_MGPD)) {
+   pr.data05_MGPD$Precision[i] <- sum((res_size_05$Outcome == 1) &
+                                      (res_size_05$Predict_Gumbel_05 > dis.thres05_MGPD[i]) , na.rm = T 
+                                    ) / sum((res_size_05$Predict_Gumbel_05 > dis.thres05_MGPD[i]) )
+  pr.data05_MGPD$Recall[i] <- sum((res_size_05$Outcome == 1) &
+                                      (res_size_05$Predict_Gumbel_05 > dis.thres05_MGPD[i]), na.rm = T 
+                                    ) / sum( (res_size_05$Outcome == 1))
+}
+
+dis.thres05_TRUE <- sort(res_size_05$Predict_True_05, decreasing = TRUE)
+
+pr.data05_TRUE <-
+  data.frame(DisThres = c(dis.thres05_TRUE),
+             Model = rep("True", length(dis.thres05_TRUE)))
+for (i in 1:length(dis.thres05_TRUE)) {
+
+     pr.data05_TRUE$Precision[i] <- sum((res_size_05$Outcome == 1) &
+                                      (res_size_05$Predict_True_05 > dis.thres05_TRUE[i]) , na.rm = T 
+                                    ) / sum((res_size_05$Predict_True_05 > dis.thres05_TRUE[i]) )
+  pr.data05_TRUE$Recall[i] <- sum((res_size_05$Outcome == 1) &
+                                      (res_size_05$Predict_True_05 > dis.thres05_TRUE[i]), na.rm = T 
+                                    ) / sum( (res_size_05$Outcome == 1))
+}
+
+pr.data05 <- rbind(pr.data05_MGPD, pr.data05_LOGIT) #rbind(pr.data05_MGPD, pr.data05_LOGIT, pr.data05_TRUE)
+```
+
+```{r  PRCSimus_Size_05}
+PRCSimus_Size_05 <-
+  ggplot(data = pr.data05, aes(
+    x = Recall,
+    y = Precision,
+    colour = Model,
+    linetype = Model
+  )) + geom_path()
+PRCSimus_Size_05 <- PRCSimus_Size_05 + geom_hline(yintercept = sum( (res_size_05$Outcome == 1))/length(res_size_05$Outcome))
+PRCSimus_Size_05 <- PRCSimus_Size_05 + xlim(c(0, 1)) + ylim(c(0, 1))
+PRCSimus_Size_05 <- PRCSimus_Size_05 + scale_color_manual(values = c("blue", "red"))
+PRCSimus_Size_05 <- PRCSimus_Size_05 + xlab("Recall") + ylab("Precision")
+PRCSimus_Size_05 <- PRCSimus_Size_05 + ggtitle(TeX('Level = $4,031$ ($\\kappa =0.5$)'))
+PRCSimus_Size_05 <- PRCSimus_Size_05 + theme(
+  panel.grid.minor = element_blank(),
+ text = element_text(size = 16),
+  axis.text.x = element_text(size = 14),
+  axis.text.y = element_text(size = 14),
+  plot.title = element_text(size = 18),
+  legend.title=element_text(size=12), 
+  legend.text=element_text(size=12)
+)
+```
+
+### Threshold 6,046 ($\kappa = 0.75$)
+
+```{r res_size_075}
+res_size_075 <-
+  subset(res_size,
          select = c(
            Size,
            Predict_Gumbel_075,
            Predict_Logit_075,
            Predict_True_075
          ))
-res_Size_075$Outcome <-
-  as.numeric(res_Size_075$Size > thres_pred[2])
-
-
-x.plot <-
-  ggplot(data = res_Size_075, aes(x = as.factor(Outcome), y = Predict_Gumbel_075))
-x.plot <-
-  x.plot + geom_boxplot(outlier.size = 0.5,
-                        outlier.shape = 1,
-                        size = 0.5)
-x.plot <- x.plot + ggtitle("GP prediction")
-x.plot <-
-  x.plot + xlab("Outcome") + ylab("Prediction probability")
-x.plot <- x.plot + theme(
-  panel.grid.minor = element_blank(),
-  text = element_text(size = 10),
-  axis.text.x = element_text(size = 8),
-  axis.text.y = element_text(size = 8),
-  plot.title = element_text(size = 10)
-)
-
-y.plot <-
-  ggplot(data = res_Size_075, aes(x = as.factor(Outcome), y = Predict_Logit_075))
-y.plot <-
-  y.plot + geom_boxplot(outlier.size = 0.5,
-                        outlier.shape = 1,
-                        size = 0.5)
-y.plot <- y.plot + ggtitle("Logistic model")
-y.plot <-
-  y.plot + xlab("Outcome") + ylab("Prediction probability")
-y.plot <- y.plot + theme(
-  panel.grid.minor = element_blank(),
-  text = element_text(size = 10),
-  axis.text.x = element_text(size = 8),
-  axis.text.y = element_text(size = 8),
-  plot.title = element_text(size = 10)
-)
-
-
-z.plot <- grid.arrange(x.plot, y.plot, ncol = 2)
+res_size_075$Outcome <-
+  as.numeric(res_size_075$Size > thres_pred[2])
 ```
 
-### Figure 7b)
-```{r true brierplot075}
-x.plot <-
-  ggplot(data = res_Size_075, aes(x = as.factor(Outcome), y = Predict_Gumbel_075))
-x.plot <-
-  x.plot + geom_boxplot(outlier.size = 0.5,
+```{r BrierSimus075_Size_GP}
+BrierSimus075_Size_GP <-
+  ggplot(data = res_size_075, aes(x = as.factor(Outcome), y = Predict_Gumbel_075))
+BrierSimus075_Size_GP <-
+  BrierSimus075_Size_GP + geom_boxplot(outlier.size = 0.5,
                         outlier.shape = 1,
                         size = 0.5)
-x.plot <- x.plot + ggtitle("Estimated model")
-x.plot <-
-  x.plot + xlab("Outcome") + ylab("Prediction probability")
-x.plot <- x.plot + theme(
+BrierSimus075_Size_GP <- BrierSimus075_Size_GP + ggtitle(TeX('Level = $6,046$ ($\\kappa =0.75$)'))
+BrierSimus075_Size_GP <-
+  BrierSimus075_Size_GP + xlab("Outcome") + ylab("Prediction probability")
+BrierSimus075_Size_GP <- BrierSimus075_Size_GP + theme(
   panel.grid.minor = element_blank(),
-  text = element_text(size = 10),
-  axis.text.x = element_text(size = 8),
-  axis.text.y = element_text(size = 8),
-  plot.title = element_text(size = 10)
+  text = element_text(size = 16),
+  axis.text.x = element_text(size = 14),
+  axis.text.y = element_text(size = 14),
+  plot.title = element_text(size = 18)
 )
+BrierSimus075_Size_GP <- BrierSimus075_Size_GP + ylim(0,1)
+BrierSimus075_Size_GP
+```
 
+```{r BrierSimus075_Size_Logistic}
+BrierSimus075_Size_Logistic <-
+  ggplot(data = res_size_075, aes(x = as.factor(Outcome), y = Predict_Logit_075))
+BrierSimus075_Size_Logistic <-
+  BrierSimus075_Size_Logistic + geom_boxplot(outlier.size = 0.5,
+                        outlier.shape = 1,
+                        size = 0.5)
+BrierSimus075_Size_Logistic <- BrierSimus075_Size_Logistic + ggtitle(TeX('Level = $6,046$ ($\\kappa =0.75$)'))
+BrierSimus075_Size_Logistic <-
+  BrierSimus075_Size_Logistic + xlab("Outcome") + ylab("Prediction probability")
+BrierSimus075_Size_Logistic <- BrierSimus075_Size_Logistic + theme(
+  panel.grid.minor = element_blank(),
+  text = element_text(size = 16),
+  axis.text.x = element_text(size = 14),
+  axis.text.y = element_text(size = 14),
+  plot.title = element_text(size = 18)
+)
+BrierSimus075_Size_Logistic <- BrierSimus075_Size_Logistic + ylim(0,1)
+```
 
-y.plot <-
-  ggplot(data = res_Size_075, aes(x = as.factor(Outcome), y = Predict_True_075))
-y.plot <-
-  y.plot +  geom_boxplot(outlier.size = 0.5,
+```{r BrierSimus075_Size_True}
+BrierSimus075_Size_True <-
+  ggplot(data = res_size_075, aes(x = as.factor(Outcome), y = Predict_True_075))
+BrierSimus075_Size_True <-
+  BrierSimus075_Size_True +  geom_boxplot(outlier.size = 0.5,
                          outlier.shape = 1,
                          size = 0.5)
-y.plot <- y.plot + ggtitle("True model")
-y.plot <-
-  y.plot + xlab("Outcome") + ylab("Prediction probability")
-y.plot <- y.plot + theme(
+BrierSimus075_Size_True <- BrierSimus075_Size_True + ggtitle(TeX('Level = $6,046$ ($\\kappa =0.75$)'))
+BrierSimus075_Size_True <-
+  BrierSimus075_Size_True + xlab("Outcome") + ylab("Prediction probability")
+BrierSimus075_Size_True <- BrierSimus075_Size_True + theme(
   panel.grid.minor = element_blank(),
-  text = element_text(size = 10),
-  axis.text.x = element_text(size = 8),
-  axis.text.y = element_text(size = 8),
-  plot.title = element_text(size = 10)
+  text = element_text(size = 16),
+  axis.text.x = element_text(size = 14),
+  axis.text.y = element_text(size = 14),
+  plot.title = element_text(size = 18)
 )
-
-z.plot <- grid.arrange(x.plot, y.plot, ncol = 2)
+BrierSimus075_Size_True <- BrierSimus075_Size_True + ylim(0,1)
 ```
 
-### Threshold = 0.95 $\times$ max = 6,879 (not shown in the paper)
-```{r logistic brierplot095}
-res_Size_095 <-
-  subset(res_Size,
+```{r pr.data075}
+dis.thres075_LOGIT <- sort(res_size_075$Predict_Logit_075, decreasing = TRUE) 
+ pr.data075_LOGIT <-
+  data.frame(DisThres = dis.thres075_LOGIT, Model = rep("Logistic", length(dis.thres075_LOGIT)))
+  for (i in 1:length(dis.thres075_LOGIT)) {
+  pr.data075_LOGIT$Precision[i] <- sum((res_size_075$Outcome == 1) &
+                                      (res_size_075$Predict_Logit_075 > dis.thres075_LOGIT[i]) , na.rm = T 
+                                    ) / sum((res_size_075$Predict_Logit_075 > dis.thres075_LOGIT[i]), na.rm = T)
+  pr.data075_LOGIT$Recall[i] <- sum((res_size_075$Outcome == 1) &
+                                      (res_size_075$Predict_Logit_075 > dis.thres075_LOGIT[i]), na.rm = T 
+                                    ) / sum( (res_size_075$Outcome == 1))
+}
+
+
+dis.thres075_MGPD <- sort(res_size_075$Predict_Gumbel_075, decreasing = TRUE)
+pr.data075_MGPD <-
+  data.frame(DisThres = c(dis.thres075_MGPD),
+             Model = rep("Gumbel", length(dis.thres075_MGPD)))
+
+for (i in 1:length(dis.thres075_MGPD)) {
+   pr.data075_MGPD$Precision[i] <- sum((res_size_075$Outcome == 1) &
+                                      (res_size_075$Predict_Gumbel_075 > dis.thres075_MGPD[i]) , na.rm = T 
+                                    ) / sum((res_size_075$Predict_Gumbel_075 > dis.thres075_MGPD[i]) )
+  pr.data075_MGPD$Recall[i] <- sum((res_size_075$Outcome == 1) &
+                                      (res_size_075$Predict_Gumbel_075 > dis.thres075_MGPD[i]), na.rm = T 
+                                    ) / sum( (res_size_075$Outcome == 1))
+}
+
+dis.thres075_TRUE <- sort(res_size_075$Predict_True_075, decreasing = TRUE)
+
+pr.data075_TRUE <-
+  data.frame(DisThres = c(dis.thres075_TRUE),
+             Model = rep("True", length(dis.thres075_TRUE)))
+for (i in 1:length(dis.thres075_TRUE)) {
+
+     pr.data075_TRUE$Precision[i] <- sum((res_size_075$Outcome == 1) &
+                                      (res_size_075$Predict_True_075 > dis.thres075_TRUE[i]) , na.rm = T 
+                                    ) / sum((res_size_075$Predict_True_075 > dis.thres075_TRUE[i]) )
+  pr.data075_TRUE$Recall[i] <- sum((res_size_075$Outcome == 1) &
+                                      (res_size_075$Predict_True_075 > dis.thres075_TRUE[i]), na.rm = T 
+                                    ) / sum( (res_size_075$Outcome == 1))
+}
+
+pr.data075 <- rbind(pr.data075_MGPD, pr.data075_LOGIT)#, pr.data075_TRUE)
+```
+
+```{r  PRCSimus_Size_075}
+PRCSimus_Size_075 <-
+  ggplot(data = pr.data075, aes(
+    x = Recall,
+    y = Precision,
+    colour = Model,
+    linetype = Model
+  )) + geom_path()
+PRCSimus_Size_075 <- PRCSimus_Size_075 + geom_hline(yintercept = sum( (res_size_075$Outcome == 1))/length(res_size_075$Outcome))
+PRCSimus_Size_075 <- PRCSimus_Size_075 + xlim(c(0, 1)) + ylim(c(0, 1))
+PRCSimus_Size_075 <- PRCSimus_Size_075 + scale_color_manual(values = c("blue", "red"))
+PRCSimus_Size_075 <- PRCSimus_Size_075 + xlab("Recall") + ylab("Precision")
+PRCSimus_Size_075 <- PRCSimus_Size_075 + ggtitle(TeX('Level = $6,046$ ($\\kappa =0.75$)'))
+PRCSimus_Size_075 <- PRCSimus_Size_075 + theme(
+  panel.grid.minor = element_blank(),
+ text = element_text(size = 16),
+  axis.text.x = element_text(size = 14),
+  axis.text.y = element_text(size = 14),
+  plot.title = element_text(size = 18),
+  legend.title=element_text(size=12), 
+  legend.text=element_text(size=12)
+)
+PRCSimus_Size_075
+```
+
+
+
+### Threshold  7,659 ($\kappa = 0.95$)
+
+```{r res_size_095}
+res_size_095 <-
+  subset(res_size,
          select = c(
            Size,
            Predict_Gumbel_095,
-           Predict_Logit_095,
            Predict_True_095
          ))
-res_Size_095$Outcome <-
-  as.numeric(res_Size_095$Size > thres_pred[3])
+res_size_095$Outcome <-
+  as.numeric(res_size_095$Size > thres_pred[3])
+```
 
-x.plot <-
-  ggplot(data = res_Size_095, aes(x = as.factor(Outcome), y = Predict_Gumbel_095))
-x.plot <-
-  x.plot + geom_boxplot(outlier.size = 0.5,
+```{r BrierSimus095_Size_GP}
+BrierSimus095_Size_GP <-
+  ggplot(data = res_size_095, aes(x = as.factor(Outcome), y = Predict_Gumbel_095))
+BrierSimus095_Size_GP <-
+  BrierSimus095_Size_GP + geom_boxplot(outlier.size = 0.5,
                         outlier.shape = 1,
                         size = 0.5)
-x.plot <- x.plot + ggtitle("Estimated model")
-x.plot <-
-  x.plot + xlab("Outcome") + ylab("Prediction probability")
-x.plot <- x.plot + theme(
+BrierSimus095_Size_GP <- BrierSimus095_Size_GP + ggtitle(TeX('Level = $7,659$ ($\\kappa =0.95$)'))
+BrierSimus095_Size_GP <-
+  BrierSimus095_Size_GP + xlab("Outcome") + ylab("Prediction probability")
+BrierSimus095_Size_GP <- BrierSimus095_Size_GP + theme(
   panel.grid.minor = element_blank(),
-  text = element_text(size = 10),
-  axis.text.x = element_text(size = 8),
-  axis.text.y = element_text(size = 8),
-  plot.title = element_text(size = 10)
+  text = element_text(size = 16),
+  axis.text.x = element_text(size = 14),
+  axis.text.y = element_text(size = 14),
+  plot.title = element_text(size = 18)
 )
+BrierSimus095_Size_GP <- BrierSimus095_Size_GP + ylim(0,1)
+```
 
-y.plot <-
-  ggplot(data = res_Size_095, aes(x = as.factor(Outcome), y = Predict_Logit_095))
-y.plot <-
-  y.plot +  geom_boxplot(outlier.size = 0.5,
+
+```{r BrierSimus095_Size_True}
+BrierSimus095_Size_True <-
+  ggplot(data = res_size_095, aes(x = as.factor(Outcome), y = Predict_True_095))
+BrierSimus095_Size_True <-
+  BrierSimus095_Size_True +  geom_boxplot(outlier.size = 0.5,
                          outlier.shape = 1,
                          size = 0.5)
-y.plot <- y.plot + ggtitle("Logistic regression")
-y.plot <-
-  y.plot + xlab("Outcome") + ylab("Prediction probability")
-y.plot <- y.plot + theme(
+BrierSimus095_Size_True <- BrierSimus095_Size_True + ggtitle(TeX('Level = $7,659$ ($\\kappa =0.95$)'))
+BrierSimus095_Size_True <-
+  BrierSimus095_Size_True + xlab("Outcome") + ylab("Prediction probability")
+BrierSimus095_Size_True <- BrierSimus095_Size_True + theme(
   panel.grid.minor = element_blank(),
-  text = element_text(size = 10),
-  axis.text.x = element_text(size = 8),
-  axis.text.y = element_text(size = 8),
-  plot.title = element_text(size = 10)
+  text = element_text(size = 16),
+  axis.text.x = element_text(size = 14),
+  axis.text.y = element_text(size = 14),
+  plot.title = element_text(size = 18)
 )
-
-
-z.plot <- grid.arrange(x.plot, y.plot, ncol = 2)
+BrierSimus095_Size_True <- BrierSimus095_Size_True + ylim(0,1)
 ```
 
-#### Figure 7c)
-```{r true brierplot095}
-x.plot <-
-  ggplot(data = res_Size_095, aes(x = as.factor(Outcome), y = Predict_Gumbel_095))
-x.plot <-
-  x.plot + geom_boxplot(outlier.size = 0.5,
+```{r pr.data095}
+dis.thres095_MGPD <- sort(res_size_095$Predict_Gumbel_095, decreasing = TRUE)
+pr.data095_MGPD <-
+  data.frame(DisThres = c(dis.thres095_MGPD),
+             Model = rep("Gumbel", length(dis.thres095_MGPD)))
+
+for (i in 1:length(dis.thres095_MGPD)) {
+   pr.data095_MGPD$Precision[i] <- sum((res_size_095$Outcome == 1) &
+                                      (res_size_095$Predict_Gumbel_095 > dis.thres095_MGPD[i]) , na.rm = T 
+                                    ) / sum((res_size_095$Predict_Gumbel_095 > dis.thres095_MGPD[i]) )
+  pr.data095_MGPD$Recall[i] <- sum((res_size_095$Outcome == 1) &
+                                      (res_size_095$Predict_Gumbel_095 > dis.thres095_MGPD[i]), na.rm = T 
+                                    ) / sum( (res_size_095$Outcome == 1))
+}
+
+dis.thres095_TRUE <- sort(res_size_095$Predict_True_095, decreasing = TRUE)
+
+pr.data095_TRUE <-
+  data.frame(DisThres = c(dis.thres095_TRUE),
+             Model = rep("True", length(dis.thres095_TRUE)))
+for (i in 1:length(dis.thres095_TRUE)) {
+
+     pr.data095_TRUE$Precision[i] <- sum((res_size_095$Outcome == 1) &
+                                      (res_size_095$Predict_True_095 > dis.thres095_TRUE[i]) , na.rm = T 
+                                    ) / sum((res_size_095$Predict_True_095 > dis.thres095_TRUE[i]) )
+  pr.data095_TRUE$Recall[i] <- sum((res_size_095$Outcome == 1) &
+                                      (res_size_095$Predict_True_095 > dis.thres095_TRUE[i]), na.rm = T 
+                                    ) / sum( (res_size_095$Outcome == 1))
+}
+
+pr.data095 <- rbind(pr.data095_MGPD)#, pr.data095_TRUE)
+```
+
+
+```{r  PRCSimus_Size_095}
+PRCSimus_Size_095 <-
+  ggplot(data = pr.data095, aes(
+    x = Recall,
+    y = Precision,
+    colour = Model,
+    linetype = Model
+  )) + geom_path()
+PRCSimus_Size_095 <- PRCSimus_Size_095 + geom_hline(yintercept = sum( (res_size_095$Outcome == 1))/length(res_size_095$Outcome))
+PRCSimus_Size_095 <- PRCSimus_Size_095 + xlim(c(0, 1)) + ylim(c(0, 1))
+PRCSimus_Size_095 <- PRCSimus_Size_095 + scale_color_manual(values = c("blue"))
+PRCSimus_Size_095 <- PRCSimus_Size_095 + xlab("Recall") + ylab("Precision")
+PRCSimus_Size_095 <- PRCSimus_Size_095 + ggtitle(TeX('Level = $7,659$ ($\\kappa =0.95$)'))
+PRCSimus_Size_095 <- PRCSimus_Size_095 + theme(
+  panel.grid.minor = element_blank(),
+ text = element_text(size = 16),
+  axis.text.x = element_text(size = 14),
+  axis.text.y = element_text(size = 14),
+  plot.title = element_text(size = 18),
+  legend.title=element_text(size=12), 
+  legend.text=element_text(size=12)
+)
+PRCSimus_Size_095
+```
+
+### Threshold  8,062 ($\kappa = 1$)
+
+```{r res_size_1}
+res_size_1 <-
+  subset(res_size, select = c(Size, Predict_Gumbel_1, Predict_True_1))
+res_size_1$Outcome <- as.numeric(res_size_1$Size > thres_pred[4])
+```
+
+```{r BrierSimus1_Size_GP}
+BrierSimus1_Size_GP <-
+  ggplot(data = res_size_1, aes(x = as.factor(Outcome), y = Predict_Gumbel_1))
+BrierSimus1_Size_GP <-
+  BrierSimus1_Size_GP + geom_boxplot(outlier.size = 0.5,
                         outlier.shape = 1,
                         size = 0.5)
-x.plot <- x.plot + ggtitle("Estimated model")
-x.plot <-
-  x.plot + xlab("Outcome") + ylab("Prediction probability")
-x.plot <- x.plot + theme(
+BrierSimus1_Size_GP <- BrierSimus1_Size_GP + ggtitle(TeX('Level = $8,062$ ($\\kappa =1$)'))
+BrierSimus1_Size_GP <-
+  BrierSimus1_Size_GP + xlab("Outcome") + ylab("Prediction probability")
+BrierSimus1_Size_GP <- BrierSimus1_Size_GP + theme(
   panel.grid.minor = element_blank(),
-  text = element_text(size = 10),
-  axis.text.x = element_text(size = 8),
-  axis.text.y = element_text(size = 8),
-  plot.title = element_text(size = 10)
+  text = element_text(size = 16),
+  axis.text.x = element_text(size = 14),
+  axis.text.y = element_text(size = 14),
+  plot.title = element_text(size = 18)
 )
-x.plot
+BrierSimus1_Size_GP <- BrierSimus1_Size_GP + ylim(0,1)
+```
 
-y.plot <-
-  ggplot(data = res_Size_095, aes(x = as.factor(Outcome), y = Predict_True_095))
-y.plot <-
-  y.plot +  geom_boxplot(outlier.size = 0.5,
+```{r BrierSimus1_Size_True}
+BrierSimus1_Size_True <-
+  ggplot(data = res_size_1, aes(x = as.factor(Outcome), y = Predict_True_1))
+BrierSimus1_Size_True <-
+  BrierSimus1_Size_True +  geom_boxplot(outlier.size = 0.5,
                          outlier.shape = 1,
                          size = 0.5)
-y.plot <- y.plot + ggtitle("True model ")
-y.plot <-
-  y.plot + xlab("Outcome") + ylab("Prediction probability")
-y.plot <- y.plot + theme(
+BrierSimus1_Size_True <- BrierSimus1_Size_True + ggtitle(TeX('Level = $8,062$ ($\\kappa =1$)'))
+BrierSimus1_Size_True <-
+  BrierSimus1_Size_True + xlab("Outcome") + ylab("Prediction probability")
+BrierSimus1_Size_True <- BrierSimus1_Size_True + theme(
   panel.grid.minor = element_blank(),
-  text = element_text(size = 10),
-  axis.text.x = element_text(size = 8),
-  axis.text.y = element_text(size = 8),
-  plot.title = element_text(size = 10)
+  text = element_text(size = 16),
+  axis.text.x = element_text(size = 14),
+  axis.text.y = element_text(size = 14),
+  plot.title = element_text(size = 18)
 )
-
-
-z.plot <- grid.arrange(x.plot, y.plot, ncol = 2)
+BrierSimus1_Size_True <- BrierSimus1_Size_True + ylim(0,1)
 ```
 
-### Threshold = 1 $\times$ max = 7,241
+```{r pr.data1}
+dis.thres1_MGPD <- sort(res_size_1$Predict_Gumbel_1, decreasing = TRUE)
+pr.data1_MGPD <-
+  data.frame(DisThres = c(dis.thres1_MGPD),
+             Model = rep("Gumbel", length(dis.thres1_MGPD)))
 
-#### Figure 7d)
-```{r true brierplot1}
-res_Size_1 <-
-  subset(res_Size, select = c(Size, Predict_Gumbel_1, Predict_True_1))
-res_Size_1$Outcome <- as.numeric(res_Size_1$Size > thres_pred[4])
+for (i in 1:length(dis.thres1_MGPD)) {
+   pr.data1_MGPD$Precision[i] <- sum((res_size_1$Outcome == 1) &
+                                      (res_size_1$Predict_Gumbel_1 > dis.thres1_MGPD[i]) , na.rm = T 
+                                    ) / sum((res_size_1$Predict_Gumbel_1 > dis.thres1_MGPD[i]) )
+  pr.data1_MGPD$Recall[i] <- sum((res_size_1$Outcome == 1) &
+                                    (res_size_1$Predict_Gumbel_1 > dis.thres1_MGPD[i]), na.rm = T 
+                                    ) / sum( (res_size_1$Outcome == 1))
+}
 
-x.plot <-
-  ggplot(data = res_Size_1, aes(x = as.factor(Outcome), y = Predict_Gumbel_1))
-x.plot <-
-  x.plot + geom_boxplot(outlier.size = 0.5,
+dis.thres1_TRUE <- sort(res_size_1$Predict_True_1, decreasing = TRUE)
+
+pr.data1_TRUE <-
+  data.frame(DisThres = c(dis.thres1_TRUE),
+             Model = rep("True", length(dis.thres1_TRUE)))
+for (i in 1:length(dis.thres1_TRUE)) {
+
+     pr.data1_TRUE$Precision[i] <- sum((res_size_1$Outcome == 1) &
+                                      (res_size_1$Predict_True_1 > dis.thres1_TRUE[i]) , na.rm = T 
+                                    ) / sum((res_size_1$Predict_True_1 > dis.thres1_TRUE[i]) )
+  pr.data1_TRUE$Recall[i] <- sum((res_size_1$Outcome == 1) &
+                                      (res_size_1$Predict_True_1 > dis.thres1_TRUE[i]), na.rm = T 
+                                    ) / sum( (res_size_1$Outcome == 1))
+}
+
+pr.data1 <- rbind(pr.data1_MGPD)#, pr.data1_TRUE)
+```
+
+```{r  PRCSimus_Size_1}
+PRCSimus_Size_1 <-
+  ggplot(data = pr.data1, aes(
+    x = Recall,
+    y = Precision,
+    colour = Model,
+    linetype = Model
+  )) + geom_path()
+PRCSimus_Size_1 <- PRCSimus_Size_1 + geom_hline(yintercept = sum( (res_size_1$Outcome == 1))/length(res_size_1$Outcome))
+PRCSimus_Size_1 <- PRCSimus_Size_1 + xlim(c(0, 1)) + ylim(c(0, 1))
+PRCSimus_Size_1 <- PRCSimus_Size_1 + scale_color_manual(values = c("blue"))
+PRCSimus_Size_1 <- PRCSimus_Size_1 + xlab("Recall") + ylab("Precision")
+PRCSimus_Size_1 <- PRCSimus_Size_1 + ggtitle(TeX('Level = $8,062$ ($\\kappa =1$)'))
+PRCSimus_Size_1 <- PRCSimus_Size_1 + theme(
+  panel.grid.minor = element_blank(),
+ text = element_text(size = 16),
+  axis.text.x = element_text(size = 14),
+  axis.text.y = element_text(size = 14),
+  plot.title = element_text(size = 18),
+  legend.title=element_text(size=12), 
+  legend.text=element_text(size=12)
+)
+PRCSimus_Size_1
+```
+
+### Threshold 9,674 ($\kappa = 1.2$) --- not shown in the paper
+```{r res_size_12}
+res_size_12 <-
+  subset(res_size, select = c(Size, Predict_Gumbel_12, Predict_True_12))
+res_size_12$Outcome <-
+  as.numeric(res_size_12$Size > thres_pred[5])
+```
+
+```{r BrierSimus12_Size_GP}
+BrierSimus12_Size_GP <-
+  ggplot(data = res_size_12, aes(x = as.factor(Outcome), y = Predict_Gumbel_12))
+BrierSimus12_Size_GP <-
+  BrierSimus12_Size_GP + geom_boxplot(outlier.size = 0.5,
                         outlier.shape = 1,
                         size = 0.5)
-x.plot <- x.plot + ggtitle("Estimated model")
-x.plot <-
-  x.plot + xlab("Outcome") + ylab("Prediction probability")
-x.plot <- x.plot + theme(
+BrierSimus12_Size_GP <- BrierSimus12_Size_GP + ggtitle(TeX('Level = $9,674$ ($\\kappa =1.2$)'))
+BrierSimus12_Size_GP <-
+  BrierSimus12_Size_GP + xlab("Outcome") + ylab("Prediction probability")
+BrierSimus12_Size_GP <- BrierSimus12_Size_GP + theme(
   panel.grid.minor = element_blank(),
-  text = element_text(size = 10),
-  axis.text.x = element_text(size = 8),
-  axis.text.y = element_text(size = 8),
-  plot.title = element_text(size = 10)
+  text = element_text(size = 16),
+  axis.text.x = element_text(size = 14),
+  axis.text.y = element_text(size = 14),
+  plot.title = element_text(size = 18)
 )
+BrierSimus12_Size_GP <- BrierSimus12_Size_GP + ylim(0,1)
+BrierSimus12_Size_GP
+```
 
-y.plot <-
-  ggplot(data = res_Size_1, aes(x = as.factor(Outcome), y = Predict_True_1))
-y.plot <-
-  y.plot +  geom_boxplot(outlier.size = 0.5,
-                         outlier.shape = 1,
-                         size = 0.5)
-y.plot <- y.plot + ggtitle("True model ")
-y.plot <-
-  y.plot + xlab("Outcome") + ylab("Prediction probability")
-y.plot <- y.plot + theme(
+```{r BrierSimus12_Size_True}
+
+BrierSimus12_Size_True <-
+  ggplot(data = res_size_12, aes(x = as.factor(Outcome), y = Predict_True_12))
+BrierSimus12_Size_True <-
+  BrierSimus12_Size_True +  geom_boxplot(outlier.shape = 1, size = 0.5)
+BrierSimus12_Size_True <- BrierSimus12_Size_True + ggtitle(TeX('Level = $9,674$ ($\\kappa =1.2$)'))
+BrierSimus12_Size_True <-
+  BrierSimus12_Size_True + xlab("Outcome") + ylab("Prediction probability")
+BrierSimus12_Size_True <- BrierSimus12_Size_True + theme(
   panel.grid.minor = element_blank(),
-  text = element_text(size = 10),
-  axis.text.x = element_text(size = 8),
-  axis.text.y = element_text(size = 8),
-  plot.title = element_text(size = 10)
+  text = element_text(size = 16),
+  axis.text.x = element_text(size = 14),
+  axis.text.y = element_text(size = 14),
+  plot.title = element_text(size = 18)
 )
-
-
-z.plot <- grid.arrange(x.plot, y.plot, ncol = 2)
+BrierSimus12_Size_True <- BrierSimus12_Size_True + ylim(0,1)
 ```
 
 
-### Threshold = 1.2 $\times$ max = 8,689 (not shown in the paper)
-```{r true brierplot12}
-res_Size_12 <-
-  subset(res_Size, select = c(Size, Predict_Gumbel_12, Predict_True_12))
-res_Size_12$Outcome <-
-  as.numeric(res_Size_12$Size > thres_pred[5])
+```{r pr.data12}
+dis.thres12_MGPD <- sort(res_size_12$Predict_Gumbel_12, decreasing = TRUE)
+pr.data12_MGPD <-
+  data.frame(DisThres = c(dis.thres12_MGPD),
+             Model = rep("Gumbel", length(dis.thres12_MGPD)))
 
-x.plot <-
-  ggplot(data = res_Size_12, aes(x = as.factor(Outcome), y = Predict_Gumbel_12))
-x.plot <-
-  x.plot + geom_boxplot(outlier.size = 0.5,
-                        outlier.shape = 1,
-                        size = 0.5)
-x.plot <- x.plot + ggtitle("GP prediction")
-x.plot <-
-  x.plot + xlab("Outcome") + ylab("Prediction probability")
-x.plot <- x.plot + theme(
-  panel.grid.minor = element_blank(),
-  text = element_text(size = 10),
-  axis.text.x = element_text(size = 8),
-  axis.text.y = element_text(size = 8),
-  plot.title = element_text(size = 10)
-)
+for (i in 1:length(dis.thres12_MGPD)) {
+   pr.data12_MGPD$Precision[i] <- sum((res_size_12$Outcome == 1) &
+                                      (res_size_12$Predict_Gumbel_12 > dis.thres12_MGPD[i]) , na.rm = T 
+                                    ) / sum((res_size_12$Predict_Gumbel_12 > dis.thres12_MGPD[i]) )
+  pr.data12_MGPD$Recall[i] <- sum((res_size_12$Outcome == 1) &
+                                      (res_size_12$Predict_Gumbel_12 > dis.thres12_MGPD[i]), na.rm = T 
+                                    ) / sum( (res_size_12$Outcome == 1))
+}
 
+dis.thres12_TRUE <- sort(res_size_12$Predict_True_12, decreasing = TRUE)
 
-y.plot <-
-  ggplot(data = res_Size_12, aes(x = as.factor(Outcome), y = Predict_True_12))
-y.plot <-
-  y.plot +  geom_boxplot(outlier.shape = 1, size = 0.5)
-y.plot <- y.plot + ggtitle("True model ")
-y.plot <-
-  y.plot + xlab("Outcome") + ylab("Prediction probability")
-y.plot <- y.plot + theme(
-  panel.grid.minor = element_blank(),
-  text = element_text(size = 10),
-  axis.text.x = element_text(size = 8),
-  axis.text.y = element_text(size = 8),
-  plot.title = element_text(size = 10)
-)
-z.plot <- grid.arrange(x.plot, y.plot, ncol = 2)
+pr.data12_TRUE <-
+  data.frame(DisThres = c(dis.thres12_TRUE),
+             Model = rep("True", length(dis.thres12_TRUE)))
+for (i in 1:length(dis.thres12_TRUE)) {
+
+     pr.data12_TRUE$Precision[i] <- sum((res_size_12$Outcome == 1) &
+                                      (res_size_12$Predict_True_12 > dis.thres12_TRUE[i]) , na.rm = T 
+                                    ) / sum((res_size_12$Predict_True_12 > dis.thres12_TRUE[i]) )
+  pr.data12_TRUE$Recall[i] <- sum((res_size_12$Outcome == 1) &
+                                      (res_size_12$Predict_True_12 > dis.thres12_TRUE[i]), na.rm = T 
+                                    ) / sum( (res_size_12$Outcome == 1))
+}
+
+pr.data12 <- rbind(pr.data12_MGPD)#, pr.data12_TRUE)
 ```
 
-## Brier scores (Table 9 b))
+```{r  PRCSimus_Size_12}
+PRCSimus_Size_12 <-
+  ggplot(data = pr.data12, aes(
+    x = Recall,
+    y = Precision,
+    colour = Model,
+    linetype = Model
+  )) + geom_path()
+PRCSimus_Size_12 <- PRCSimus_Size_12 + geom_hline(yintercept = sum( (res_size_12$Outcome == 1))/length(res_size_12$Outcome))
+PRCSimus_Size_12 <- PRCSimus_Size_12 + xlim(c(0, 1)) + ylim(c(0, 1))
+PRCSimus_Size_12 <- PRCSimus_Size_12 + scale_color_manual(values = c("blue"))
+PRCSimus_Size_12 <- PRCSimus_Size_12 + xlab("Recall") + ylab("Precision")
+PRCSimus_Size_12 <- PRCSimus_Size_12 + ggtitle(TeX('Level = $9,674$ ($\\kappa =1.2$)'))
+PRCSimus_Size_12 <- PRCSimus_Size_12 + theme(
+  panel.grid.minor = element_blank(),
+ text = element_text(size = 16),
+  axis.text.x = element_text(size = 14),
+  axis.text.y = element_text(size = 14),
+  plot.title = element_text(size = 18),
+  legend.title=element_text(size=12), 
+  legend.text=element_text(size=12)
+)
+PRCSimus_Size_12
+```
+
+
+## Table 7a)
+### Standardized Brier scores 
 ```{r brier scores}
 ##0.5
-p_05 <- mean(res_Size_05$Outcome)
+p_05 <- mean(res_size_05$Outcome)
 brier_gumbel_05 <-
-  1 - mean((res_Size_05$Predict_Gumbel_05 - res_Size_05$Outcome) ^ 2) /
+  1 - mean((res_size_05$Predict_Gumbel_05 - res_size_05$Outcome) ^ 2) /
   (p_05 * (1 - p_05))
 brier_logit_05 <-
-  1 - mean((res_Size_05$Predict_Logit_05 - res_Size_05$Outcome) ^ 2,
+  1 - mean((res_size_05$Predict_Logit_05 - res_size_05$Outcome) ^ 2,
            na.rm = T) /
  (p_05 * (1 - p_05))
 brier_true_05 <-
-  1 - mean((res_Size_05$Predict_True_05 - res_Size_05$Outcome) ^ 2,
+  1 - mean((res_size_05$Predict_True_05 - res_size_05$Outcome) ^ 2,
            na.rm = T) /
    (p_05 * (1 - p_05))
 
 ##0.75
-p_075 <- mean(res_Size_075$Outcome)
+p_075 <- mean(res_size_075$Outcome)
 brier_gumbel_075 <-
-  1 - mean((res_Size_075$Predict_Gumbel_075 - res_Size_075$Outcome) ^ 2) /
+  1 - mean((res_size_075$Predict_Gumbel_075 - res_size_075$Outcome) ^ 2) /
    (p_075 * (1 - p_075))
 brier_logit_075 <-
-  1 - mean((res_Size_075$Predict_Logit_075 - res_Size_075$Outcome) ^ 2,
+  1 - mean((res_size_075$Predict_Logit_075 - res_size_075$Outcome) ^ 2,
            na.rm = T) /
  (p_075 * (1 - p_075))
 brier_true_075 <-
-  1 - mean((res_Size_075$Predict_True_075 - res_Size_075$Outcome) ^ 2,
+  1 - mean((res_size_075$Predict_True_075 - res_size_075$Outcome) ^ 2,
            na.rm = T) /
 (p_075 * (1 - p_075))
 
 
 ##0.95
-p_095 <- mean(res_Size_095$Outcome)
+p_095 <- mean(res_size_095$Outcome)
 brier_gumbel_095 <-
-  1 - mean((res_Size_095$Predict_Gumbel_095 - res_Size_095$Outcome) ^ 2) /
+  1 - mean((res_size_095$Predict_Gumbel_095 - res_size_095$Outcome) ^ 2) /
   (p_095 * (1 - p_095))
-brier_logit_095 <-
-  1 - mean((res_Size_095$Predict_Logit_095 - res_Size_095$Outcome) ^ 2,
-           na.rm = T) /
-(p_095 * (1 - p_095))
 brier_true_095 <-
-  1 - mean((res_Size_095$Predict_True_095 - res_Size_095$Outcome) ^ 2,
+  1 - mean((res_size_095$Predict_True_095 - res_size_095$Outcome) ^ 2,
            na.rm = T) /
 (p_095 * (1 - p_095))
 
 ##1
-p_1 <- mean(res_Size_1$Outcome)
+p_1 <- mean(res_size_1$Outcome)
 brier_gumbel_1 <-
-  1 - mean((res_Size_1$Predict_Gumbel_1 - res_Size_1$Outcome) ^ 2) /
+  1 - mean((res_size_1$Predict_Gumbel_1 - res_size_1$Outcome) ^ 2) /
   (p_1 * (1 - p_1))
 brier_true_1 <-
-  1 - mean((res_Size_1$Predict_True_1 - res_Size_1$Outcome) ^ 2) /
+  1 - mean((res_size_1$Predict_True_1 - res_size_1$Outcome) ^ 2) /
    (p_1 * (1 - p_1))
 
 ##1.2
-p_12 <- mean(res_Size_12$Outcome)
+p_12 <- mean(res_size_12$Outcome)
 brier_gumbel_12 <-
-  1 - mean((res_Size_12$Predict_Gumbel_12 - res_Size_12$Outcome) ^ 2) /
+  1 - mean((res_size_12$Predict_Gumbel_12 - res_size_12$Outcome) ^ 2) /
   (p_12 * (1 - p_12))
 brier_true_12 <-
-  1 - mean((res_Size_12$Predict_True_12 - res_Size_12$Outcome) ^ 2) /
+  1 - mean((res_size_12$Predict_True_12 - res_size_12$Outcome) ^ 2) /
   (p_12 * (1 - p_12))
 ```
 
-```{r table9b}
-table9 <- data.frame(matrix(c(0.5, 0.75, 0.95, 1, 1.2, brier_gumbel_05, brier_gumbel_075, brier_gumbel_095, brier_gumbel_1, brier_gumbel_12, brier_logit_05, brier_logit_075, brier_logit_095, NA, NA,brier_true_05, brier_true_075, brier_true_095, brier_true_1, brier_true_12), byrow = T, ncol = 5))
-rownames(table9) <- c("Multiple", "GP", "Logistic", "True")
-kable(table9)
+```{r table7aBrier}
+table7aBrier <- data.frame(matrix(c(brier_gumbel_05, brier_gumbel_075, brier_gumbel_095, brier_gumbel_1, brier_gumbel_12, brier_logit_05, brier_logit_075, NA, NA, NA,brier_true_05, brier_true_075, brier_true_095, brier_true_1, brier_true_12), byrow = T, ncol = 5))
+rownames(table7aBrier) <- c( "GP", "Logistic", "True")
+colnames(table7aBrier) <-c(0.5, 0.75, 0.95, 1, 1.2)
+kable(table7aBrier)
 ```
 
-
-## ROC and AUC (not shown in the paper)
-
-### Threshold = 0.5 $\times$ max = 3,620
-
-```{r roc05}
-dis.thres_LOGIT <- sort(res_Size_05$Predict_Logit_05)
-roc.data_LOGIT <-
-  data.frame(DisThres = dis.thres_LOGIT, Model = rep("Logistic", length(dis.thres_LOGIT)))
-for (i in 1:length(dis.thres_LOGIT)) {
-  roc.data_LOGIT$TP[i] <-
-    sum((res_Size_05$Predict_Logit_05 > dis.thres_LOGIT[i]) &
-          (res_Size_05$Outcome == 1),
-        na.rm = T
-    ) / sum(res_Size_05$Outcome == 1)
-  roc.data_LOGIT$FP[i] <-
-    sum((res_Size_05$Predict_Logit_05 > dis.thres_LOGIT[i]) &
-          (res_Size_05$Outcome == 0),
-        na.rm = T
-    ) / sum(res_Size_05$Outcome == 0)
-}
+### Table of Average Precision Score ###
+```{r APS}
+##  0.5 ###
+AP_GP_05 <- sum(pr.data05_MGPD$Precision*(pr.data05_MGPD$Recall - c(0,pr.data05_MGPD$Recall[-length(dis.thres05_MGPD)])), na.rm = T)
+AP_LOGIT_05 <- sum(pr.data05_LOGIT$Precision*(pr.data05_LOGIT$Recall - c(0,pr.data05_LOGIT$Recall[-length(dis.thres05_LOGIT)])), na.rm = T)
+AP_TRUE_05 <- sum(pr.data05_TRUE$Precision*(pr.data05_TRUE$Recall - c(0,pr.data05_TRUE$Recall[-length(dis.thres05_TRUE)])), na.rm = T)
 
 
-dis.thres_MGPD <- sort(res_Size_05$Predict_Gumbel_05)
-roc.data_MGPD <-
-  data.frame(DisThres = c(dis.thres_MGPD),
-             Model = rep("Gumbel", length(dis.thres_MGPD)))
+##  0.75 ###
+AP_GP_075 <- sum(pr.data075_MGPD$Precision*(pr.data075_MGPD$Recall - c(0,pr.data075_MGPD$Recall[-length(dis.thres075_MGPD)])), na.rm = T)
+AP_LOGIT_075 <- sum(pr.data075_LOGIT$Precision*(pr.data075_LOGIT$Recall - c(0,pr.data075_LOGIT$Recall[-length(dis.thres075_LOGIT)])), na.rm = T)
+AP_TRUE_075 <- sum(pr.data075_TRUE$Precision*(pr.data075_TRUE$Recall - c(0,pr.data075_TRUE$Recall[-length(dis.thres075_TRUE)])), na.rm = T)
 
-for (i in 1:length(dis.thres_MGPD)) {
-  roc.data_MGPD$TP[i] <-
-    sum((res_Size_05$Predict_Gumbel_05 > dis.thres_MGPD[i]) &
-          (res_Size_05$Outcome == 1)) / sum(res_Size_05$Outcome == 1)
-  roc.data_MGPD$FP[i] <-
-    sum((res_Size_05$Predict_Gumbel_05 > dis.thres_MGPD[i]) &
-          (res_Size_05$Outcome == 0)) / sum(res_Size_05$Outcome == 0)
-}
+##  0.95 ###
+AP_GP_095 <- sum(pr.data095_MGPD$Precision*(pr.data095_MGPD$Recall - c(0,pr.data095_MGPD$Recall[-length(dis.thres095_MGPD)])), na.rm = T)
+AP_TRUE_095 <- sum(pr.data095_TRUE$Precision*(pr.data095_TRUE$Recall - c(0,pr.data095_TRUE$Recall[-length(dis.thres095_TRUE)])), na.rm = T)
 
-dis.thres_TRUE <- sort(res_Size_05$Predict_True_05)
-roc.data_TRUE <-
-  data.frame(DisThres = dis.thres_TRUE, Model = rep("True", length(dis.thres_TRUE)))
-for (i in 1:length(dis.thres_TRUE)) {
-  roc.data_TRUE$TP[i] <-
-    sum((res_Size_05$Predict_True_05 > dis.thres_TRUE[i]) &
-          (res_Size_05$Outcome == 1),
-        na.rm = T
-    ) / sum(res_Size_05$Outcome == 1)
-  roc.data_TRUE$FP[i] <-
-    sum((res_Size_05$Predict_True_05 > dis.thres_TRUE[i]) &
-          (res_Size_05$Outcome == 0),
-        na.rm = T
-    ) / sum(res_Size_05$Outcome == 0)
-}
+## 1 ###
+AP_GP_1 <- sum(pr.data1_MGPD$Precision*(pr.data1_MGPD$Recall - c(0,pr.data1_MGPD$Recall[-length(dis.thres1_MGPD)])), na.rm = T)
+AP_TRUE_1 <- sum(pr.data1_TRUE$Precision*(pr.data1_TRUE$Recall - c(0,pr.data1_TRUE$Recall[-length(dis.thres1_TRUE)])), na.rm = T)
 
-roc.data <- rbind(roc.data_MGPD, roc.data_LOGIT, roc.data_TRUE)
+## 1.2 ###
+AP_GP_12 <- sum(pr.data12_MGPD$Precision*(pr.data12_MGPD$Recall - c(0,pr.data12_MGPD$Recall[-length(dis.thres12_MGPD)])), na.rm = T)
+AP_TRUE_12 <- sum(pr.data12_TRUE$Precision*(pr.data12_TRUE$Recall - c(0,pr.data12_TRUE$Recall[-length(dis.thres12_TRUE)])), na.rm = T)
 
 
-x.plot <-
-  ggplot(data = roc.data, aes(
-    x = FP,
-    y = TP,
-    colour = Model,
-    linetype = Model
-  )) + geom_path()
-x.plot <- x.plot + geom_abline(intercept = 0, slope = 1)
-x.plot <- x.plot + xlim(c(0, 1)) + ylim(c(0, 1))
-x.plot <- x.plot + scale_color_manual(values = c("blue", "red", "orange"))
-x.plot <- x.plot + xlab("False positives") + ylab("True positives")
-x.plot <- x.plot + theme(
-  panel.grid.minor = element_blank(),
-  text = element_text(size = 10),
-  axis.text.x = element_text(size = 8),
-  axis.text.y = element_text(size = 8),
-  plot.title = element_text(size = 10)
-)
-x.plot
-
-
-## AUC ###
-auc_GP_05 <- auc(roc(res_Size_05$Outcome, res_Size_05$Predict_Gumbel_05))
-auc_Logit_05 <- auc(roc(res_Size_05$Outcome, res_Size_05$Predict_Logit_05))
-auc_True_05 <- auc(roc(res_Size_05$Outcome, res_Size_05$Predict_True_05))
-
-kable(data.frame(c(auc_GP_05, auc_Logit_05, auc_True_05)))
 ```
 
-
-### Threshold = 0.75 $\times$ max = 5,431
-
-```{r roc075}
-dis.thres_LOGIT <- sort(res_Size_075$Predict_Logit_075)
-roc.data_LOGIT <-
-  data.frame(DisThres = dis.thres_LOGIT, Model = rep("Logistic", length(dis.thres_LOGIT)))
-for (i in 1:length(dis.thres_LOGIT)) {
-  roc.data_LOGIT$TP[i] <-
-    sum((res_Size_075$Predict_Logit_075 > dis.thres_LOGIT[i]) &
-          (res_Size_075$Outcome == 1),
-        na.rm = T
-    ) / sum(res_Size_075$Outcome == 1)
-  roc.data_LOGIT$FP[i] <-
-    sum((res_Size_075$Predict_Logit_075 > dis.thres_LOGIT[i]) &
-          (res_Size_075$Outcome == 0),
-        na.rm = T
-    ) / sum(res_Size_075$Outcome == 0)
-}
-
-
-dis.thres_MGPD <- sort(res_Size_075$Predict_Gumbel_075)
-roc.data_MGPD <-
-  data.frame(DisThres = c(dis.thres_MGPD),
-             Model = rep("Gumbel", length(dis.thres_MGPD)))
-
-for (i in 1:length(dis.thres_MGPD)) {
-  roc.data_MGPD$TP[i] <-
-    sum((res_Size_075$Predict_Gumbel_075 > dis.thres_MGPD[i]) &
-          (res_Size_075$Outcome == 1)) / sum(res_Size_075$Outcome == 1)
-  roc.data_MGPD$FP[i] <-
-    sum((res_Size_075$Predict_Gumbel_075 > dis.thres_MGPD[i]) &
-          (res_Size_075$Outcome == 0)) / sum(res_Size_075$Outcome == 0)
-}
-
-dis.thres_TRUE <- sort(res_Size_075$Predict_True_075)
-roc.data_TRUE <-
-  data.frame(DisThres = dis.thres_TRUE, Model = rep("True", length(dis.thres_TRUE)))
-for (i in 1:length(dis.thres_TRUE)) {
-  roc.data_TRUE$TP[i] <-
-    sum((res_Size_075$Predict_True_075 > dis.thres_TRUE[i]) &
-          (res_Size_075$Outcome == 1),
-        na.rm = T
-    ) / sum(res_Size_075$Outcome == 1)
-  roc.data_TRUE$FP[i] <-
-    sum((res_Size_075$Predict_True_075 > dis.thres_TRUE[i]) &
-          (res_Size_075$Outcome == 0),
-        na.rm = T
-    ) / sum(res_Size_075$Outcome == 0)
-}
-
-roc.data <- rbind(roc.data_MGPD, roc.data_LOGIT, roc.data_TRUE)
-
-
-x.plot <-
-  ggplot(data = roc.data, aes(
-    x = FP,
-    y = TP,
-    colour = Model,
-    linetype = Model
-  )) + geom_path()
-x.plot <- x.plot + geom_abline(intercept = 0, slope = 1)
-x.plot <- x.plot + xlim(c(0, 1)) + ylim(c(0, 1))
-x.plot <- x.plot + scale_color_manual(values = c("blue", "red", "orange"))
-x.plot <- x.plot + xlab("False positives") + ylab("True positives")
-x.plot <- x.plot + theme(
-  panel.grid.minor = element_blank(),
-  text = element_text(size = 10),
-  axis.text.x = element_text(size = 8),
-  axis.text.y = element_text(size = 8),
-  plot.title = element_text(size = 10)
-)
-x.plot
-
-
-
-## AUC ###
-auc_GP_075 <- auc(roc(res_Size_075$Outcome, res_Size_075$Predict_Gumbel_075))
-auc_Logit_075 <- auc(roc(res_Size_075$Outcome, res_Size_075$Predict_Logit_075))
-auc_True_075 <- auc(roc(res_Size_075$Outcome, res_Size_075$Predict_True_075))
-
-kable(data.frame(c(auc_GP_075, auc_Logit_075, auc_True_075)))
-```
-
-
-
-### Threshold = 0.95 $\times$ max = 6,879
-
-```{r roc095}
-dis.thres_LOGIT <- sort(res_Size_095$Predict_Logit_095)
-roc.data_LOGIT <-
-  data.frame(DisThres = dis.thres_LOGIT, Model = rep("Logistic", length(dis.thres_LOGIT)))
-for (i in 1:length(dis.thres_LOGIT)) {
-  roc.data_LOGIT$TP[i] <-
-    sum((res_Size_095$Predict_Logit_095 > dis.thres_LOGIT[i]) &
-          (res_Size_095$Outcome == 1),
-        na.rm = T
-    ) / sum(res_Size_095$Outcome == 1)
-  roc.data_LOGIT$FP[i] <-
-    sum((res_Size_095$Predict_Logit_095 > dis.thres_LOGIT[i]) &
-          (res_Size_095$Outcome == 0),
-        na.rm = T
-    ) / sum(res_Size_095$Outcome == 0)
-}
-
-
-dis.thres_MGPD <- sort(res_Size_095$Predict_Gumbel_095)
-roc.data_MGPD <-
-  data.frame(DisThres = c(dis.thres_MGPD),
-             Model = rep("Gumbel", length(dis.thres_MGPD)))
-
-for (i in 1:length(dis.thres_MGPD)) {
-  roc.data_MGPD$TP[i] <-
-    sum((res_Size_095$Predict_Gumbel_095 > dis.thres_MGPD[i]) &
-          (res_Size_095$Outcome == 1)) / sum(res_Size_095$Outcome == 1)
-  roc.data_MGPD$FP[i] <-
-    sum((res_Size_095$Predict_Gumbel_095 > dis.thres_MGPD[i]) &
-          (res_Size_095$Outcome == 0)) / sum(res_Size_095$Outcome == 0)
-}
-
-dis.thres_TRUE <- sort(res_Size_095$Predict_True_095)
-roc.data_TRUE <-
-  data.frame(DisThres = dis.thres_TRUE, Model = rep("True", length(dis.thres_TRUE)))
-for (i in 1:length(dis.thres_TRUE)) {
-  roc.data_TRUE$TP[i] <-
-    sum((res_Size_095$Predict_True_095 > dis.thres_TRUE[i]) &
-          (res_Size_095$Outcome == 1),
-        na.rm = T
-    ) / sum(res_Size_095$Outcome == 1)
-  roc.data_TRUE$FP[i] <-
-    sum((res_Size_095$Predict_True_095 > dis.thres_TRUE[i]) &
-          (res_Size_095$Outcome == 0),
-        na.rm = T
-    ) / sum(res_Size_095$Outcome == 0)
-}
-
-roc.data <- rbind(roc.data_MGPD, roc.data_LOGIT, roc.data_TRUE)
-
-
-x.plot <-
-  ggplot(data = roc.data, aes(
-    x = FP,
-    y = TP,
-    colour = Model,
-    linetype = Model
-  )) + geom_path()
-x.plot <- x.plot + geom_abline(intercept = 0, slope = 1)
-x.plot <- x.plot + xlim(c(0, 1)) + ylim(c(0, 1))
-x.plot <- x.plot + scale_color_manual(values = c("blue", "red", "orange"))
-x.plot <- x.plot + xlab("False positives") + ylab("True positives")
-x.plot <- x.plot + theme(
-  panel.grid.minor = element_blank(),
-  text = element_text(size = 10),
-  axis.text.x = element_text(size = 8),
-  axis.text.y = element_text(size = 8),
-  plot.title = element_text(size = 10)
-)
-x.plot
-
-
-
-## AUC ###
-auc_GP_095 <- auc(roc(res_Size_095$Outcome, res_Size_095$Predict_Gumbel_095))
-auc_Logit_095 <- auc(roc(res_Size_095$Outcome, res_Size_095$Predict_Logit_095))
-auc_True_095 <- auc(roc(res_Size_095$Outcome, res_Size_095$Predict_True_095))
-
-kable(data.frame(c(auc_GP_095, auc_Logit_095, auc_True_095)))
-```
-
-### Threshold = 1 $\times$ max = 7,241
-
-```{r true roc1}
-dis.thres_MGPD <- sort(res_size_1$Predict_Gumbel_1)
-roc.data_MGPD <-
-  data.frame(DisThres = c(dis.thres_MGPD),
-             Model = rep("Gumbel", length(dis.thres_MGPD)))
-
-for (i in 1:length(dis.thres_MGPD)) {
-  roc.data_MGPD$TP[i] <-
-    sum((res_size_1$Predict_Gumbel_1 > dis.thres_MGPD[i]) &
-          (res_size_1$Outcome == 1)) / sum(res_size_1$Outcome == 1)
-  roc.data_MGPD$FP[i] <-
-    sum((res_size_1$Predict_Gumbel_1 > dis.thres_MGPD[i]) &
-          (res_size_1$Outcome == 0)) / sum(res_size_1$Outcome == 0)
-}
-
-dis.thres_TRUE <- sort(res_size_1$Predict_True_1)
-roc.data_TRUE <-
-  data.frame(DisThres = c(dis.thres_TRUE),
-             Model = rep("True", length(dis.thres_TRUE)))
-
-for (i in 1:length(dis.thres_TRUE)) {
-  roc.data_TRUE$TP[i] <-
-    sum((res_size_1$Predict_True_1 > dis.thres_TRUE[i]) &
-          (res_size_1$Outcome == 1)) / sum(res_size_1$Outcome == 1)
-  roc.data_TRUE$FP[i] <-
-    sum((res_size_1$Predict_True_1 > dis.thres_TRUE[i]) &
-          (res_size_1$Outcome == 0)) / sum(res_size_1$Outcome == 0)
-}
-
-roc.data <- rbind(roc.data_MGPD, roc.data_TRUE)
-
-x.plot <-
-  ggplot(data = roc.data, aes(
-    x = FP,
-    y = TP,
-    colour = Model,
-    linetype = Model
-  )) + geom_path()
-x.plot <- x.plot + geom_abline(intercept = 0, slope = 1)
-x.plot <- x.plot + xlim(c(0, 1)) + ylim(c(0, 1))
-x.plot <- x.plot + scale_color_manual(values = c("blue", "orange"))
-x.plot <- x.plot + xlab("False positives") + ylab("True positives")
-x.plot <- x.plot + theme(
-  panel.grid.minor = element_blank(),
-  text = element_text(size = 10),
-  axis.text.x = element_text(size = 8),
-  axis.text.y = element_text(size = 8),
-  plot.title = element_text(size = 10)
-)
-x.plot
-
-
-## AUC ###
-auc_GP_1 <- auc(roc(res_size_1$Outcome, res_size_1$Predict_Gumbel_1))
-auc_True_1 <- auc(roc(res_size_1$Outcome, res_size_1$Predict_True_1))
-
-kable(data.frame(c(auc_GP_1, auc_True_1)))
-```
-
-
-### Threshold = 1.2 $\times$ max = 8,689
-
-```{r true roc12}
-dis.thres_MGPD <- sort(res_Size_12$Predict_Gumbel_12)
-roc.data_MGPD <-
-  data.frame(DisThres = c(dis.thres_MGPD),
-             Model = rep("Gumbel", length(dis.thres_MGPD)))
-
-for (i in 1:length(dis.thres_MGPD)) {
-  roc.data_MGPD$TP[i] <-
-    sum((res_Size_12$Predict_Gumbel_12 > dis.thres_MGPD[i]) &
-          (res_Size_12$Outcome == 1)) / sum(res_Size_12$Outcome == 1)
-  roc.data_MGPD$FP[i] <-
-    sum((res_Size_12$Predict_Gumbel_1 > dis.thres_MGPD[i]) &
-          (res_Size_12$Outcome == 0)) / sum(res_Size_12$Outcome == 0)
-}
-
-
-dis.thres_TRUE <- sort(res_Size_12$Predict_True_12)
-roc.data_TRUE <-
-  data.frame(DisThres = c(dis.thres_TRUE),
-             Model = rep("True", length(dis.thres_TRUE)))
-
-for (i in 1:length(dis.thres_TRUE)) {
-  roc.data_TRUE$TP[i] <-
-    sum((res_Size_12$Predict_True_12 > dis.thres_TRUE[i]) &
-          (res_Size_12$Outcome == 1)) / sum(res_Size_12$Outcome == 1)
-  roc.data_TRUE$FP[i] <-
-    sum((res_Size_12$Predict_True_12 > dis.thres_TRUE[i]) &
-          (res_Size_12$Outcome == 0)) / sum(res_Size_12$Outcome == 0)
-}
-
-roc.data <- rbind(roc.data_MGPD, roc.data_TRUE)
-
-x.plot <-
-  ggplot(data = roc.data, aes(
-    x = FP,
-    y = TP,
-    colour = Model,
-    linetype = Model
-  )) + geom_path()
-x.plot <- x.plot + geom_abline(intercept = 0, slope = 1)
-x.plot <- x.plot + xlim(c(0, 1)) + ylim(c(0, 1))
-x.plot <- x.plot + scale_color_manual(values = c("blue", "orange"))
-x.plot <- x.plot + xlab("False positives") + ylab("True positives")
-x.plot <- x.plot + theme(
-  panel.grid.minor = element_blank(),
-  text = element_text(size = 10),
-  axis.text.x = element_text(size = 8),
-  axis.text.y = element_text(size = 8),
-  plot.title = element_text(size = 10)
-)
-x.plot
-
-
-## AUC ###
-auc_GP_12 <- auc(roc(res_Size_12$Outcome, res_Size_12$Predict_Gumbel_12))
-auc_True_12 <- auc(roc(res_Size_12$Outcome, res_Size_12$Predict_True_12))
-
-
-kable(data.frame(c(auc_GP_12, auc_True_12)))
+```{r table7aAps}
+table7aAps <- data.frame(matrix(c(AP_GP_05, AP_GP_075, AP_GP_095, AP_GP_1, AP_GP_12, AP_LOGIT_05, AP_LOGIT_075, NA, NA, NA,AP_TRUE_05, AP_TRUE_075, AP_TRUE_095, AP_TRUE_1, AP_TRUE_12), byrow = T, ncol = 5)) 
+rownames(table7aAps) <- c( "GP", "Logistic", "True") 
+colnames(table7aAps) <- c(0.5, 0.75, 0.95, 1, 1.2) 
+kable(table7aAps)
 ```
