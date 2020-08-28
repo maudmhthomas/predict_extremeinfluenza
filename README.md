@@ -1,18 +1,19 @@
-# Predict Extremes :influenza in France
+# Real-time prediction of severe influenza epidemics using Extreme Value Statistics 
 
 This repository contains the R code attached to the paper "Predict extremes: influenza in France", M. Thomas and H. Rootzén included simulations of multivariate Generalized Pareto distributed vectors, fits of multivariate Generalized Pareto models and conditionnal predictions of exceedances of high thresholds. 
 
 ### Librairies
 To run the codes, install the following R librairies:
   - extRemes (2.0-10)
-  - ismev (1.42)
   - ggplot2 (3.2.1)
   - gridExtra (2.3)
   - doParallel (1.0.14)
-  - foreach (1.4.4
-  - brglm (0.6.2)
+  - foreach (1.4.4)
+  - glmnet (2.0-16)
   - pracma (2.2.5)
   - pROC (1.15.3)
+  - MLmetrics (1.1.1)
+  - energy (1.7-7)
 
 ### Description of the files:
 Files are provided in the format Rmarkdown. To run them, please select in RStudio "run all the chunkes" to run them in the R console or "knit to html" to provide a hmtl file containing all the codes and all outputs.
